@@ -40,8 +40,11 @@ try:
 except ImportError:
     NIDAQMX_AVAILABLE = False
 
-# Sprite art: cropped from the "Dan the Man" / Jetpack Joyride Event asset packs
-# (assets/player.png, assets/missile.png). Loaded and scaled once in main().
+# Sprite art: cropped from the "Dan the Man" asset packs (Playable Characters, Stage
+# Hazards, Jetpack Joyride Event Cutscenes, Coin Counter, Charred Death Animation) plus
+# a standalone coin icon (coin_ni_64.png). Loaded and scaled once in main(). Seeking
+# missiles are the one remaining placeholder -- drawn as a pygame primitive, no sprite
+# yet (see draw_seeking_missile).
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
 # Persistent (across runs of the program) leaderboard -- a simple JSON file next to
@@ -173,6 +176,23 @@ RUN_FPS = 10.0
 JETPACK_FRAME_COUNT = 5  # assets/jetpack_00.png .. jetpack_04.png -- played while thrusting
 JETPACK_FPS = 9.0        # ping-ponged back and forth for a hover "wobble" instead of looping
 
+# Death animation: assets/death_00.png .. death_03.png (Dan the Man "Charred Death"
+# sheet, row 1). Plays once from the moment a player dies and freezes on the last
+# (most-charred) frame, replacing the old flat dim-overlay effect.
+DEATH_FRAME_COUNT = 4
+DEATH_FPS = 9.0
+DEATH_SPRITE_H = 46  # slightly larger than PLAYER_SPRITE_H -- the flame silhouette reads better bigger
+
+# Profit Bird vehicle: a single static sprite swap (no run/jetpack animation frames
+# exist for it), given a gentle hover bob at draw time so it doesn't look frozen.
+PROFIT_BIRD_SPRITE_H = 54
+
+# Lil' Stomper vehicle: assets/lilstomper_00..05.png (a 6-frame walk/stomp cycle),
+# looped the same way the run cycle loops.
+STOMPER_FRAME_COUNT = 6
+STOMPER_FPS = 7.0
+STOMPER_SPRITE_H = 54
+
 # Fuel system: holding thrust continuously drains the tank; running dry cuts thrust
 # off (you fall) until it's refilled by letting go. Matches the "~3s of hold" ask.
 FUEL_MAX = 3.0                    # seconds of continuous thrust before empty
@@ -203,10 +223,54 @@ MISSILE_SPAWN_MIN, MISSILE_SPAWN_MAX = 2.5, 7.0            # seconds between spa
 MISSILE_START_DELAY_MIN, MISSILE_START_DELAY_MAX = 10.0, 15.0  # seconds before the first missile of a run
 MISSILE_DIFFICULTY_RANGE = 400.0  # scroll_speed increase (px/s) over which spawn gap ramps from MAX to MIN
 
+# Seeking missiles: a rarer, later-arriving hazard on its own per-lane timer, independent
+# of the straight-line Missile timer above so both types can appear in the same run.
+# Placeholder box -- no seeker sprite yet, drawn as a primitive triangle (see draw_seeking_missile).
+SEEKER_W, SEEKER_H = 46, 22
+# Spawns visible at the right edge (not deep off-screen like straight missiles) so the
+# blink telegraph below is actually visible as a warning before it launches.
+SEEKER_SPEED_MIN, SEEKER_SPEED_MAX = 260.0, 340.0             # px/s, extra over scroll_speed once launched
+SEEKER_SPAWN_MIN, SEEKER_SPAWN_MAX = 9.0, 18.0                 # seconds between seekers -- rarer than straight missiles
+SEEKER_START_DELAY_MIN, SEEKER_START_DELAY_MAX = 22.0, 30.0    # later than straight missiles' 10-15s
+SEEKER_DIFFICULTY_RANGE = 550.0
+SEEKER_BLINK_COUNT = 3       # full on/off blinks before launch
+SEEKER_BLINK_INTERVAL = 0.27  # seconds per blink half-cycle (on or off)
+SEEKER_MAX_VY = 220.0         # px/s cap on homing vertical speed -- kept well under player fall/rise
+                               # speed so a last-second dodge can always outrun the turn
+SEEKER_TURN_RATE = 900.0      # px/s^2 max rate vy can change -- gives it a turn radius instead of a snap
+SEEKER_STEER_GAIN = 4.0       # converts y-distance-to-player into desired vy (clamped to SEEKER_MAX_VY)
+
+# Vehicle power-ups (Profit Bird / Lil' Stomper, simplified): a token grants temporary
+# invulnerability; a hit while active knocks the player out of the vehicle instead of
+# killing them. In-lane pickup uses assets/vehicle_token.png (tinted per kind) for both
+# vehicle kinds -- only Profit Bird has a dedicated in-vehicle player sprite so far
+# (assets/profit_bird.png); Lil' Stomper still uses a tinted recolor of the base sprite.
+TOKEN_W, TOKEN_H = 30, 30
+TOKEN_SPAWN_MIN, TOKEN_SPAWN_MAX = 13.0, 20.0
+VEHICLE_DURATION = 6.5         # seconds of invulnerability once picked up
+VEHICLE_KINDS = ("profit_bird", "lil_stomper")
+VEHICLE_COLORS = {"profit_bird": (255, 205, 60), "lil_stomper": (150, 205, 255)}
+VEHICLE_LABELS = {"profit_bird": "PROFIT BIRD", "lil_stomper": "LIL' STOMPER"}
+PROFIT_BIRD_DISTANCE_MULT = 1.5    # brief "speed boost" -- distance accrues faster while active
+STOMPER_CEILING_FRAC = 0.55        # ground-hugging cap: can't climb above this fraction of the lane
+HIT_GRACE_PERIOD = 0.5             # seconds of invulnerability right after a vehicle absorbs a hit,
+                                    # so losing the vehicle can't immediately chain into a fatal hit
+                                    # from the same hazard on the very next frame
+
+# Picking up a vehicle token detonates every obstacle/missile/seeker currently in that
+# lane (Lane.detonate_hazards()) -- doesn't pause or end the run, just clears the
+# immediate area so the reward isn't immediately undone by whatever's already in flight.
+EXPLOSION_DURATION = 0.45  # seconds an individual blast VFX plays for
+EXPLOSION_MAX_RADIUS = 34
+
+# Coins: small, frequent, non-hazard collectibles -- track a running count per player,
+# separate from the distance score. Uses assets/coin_ni_64.png.
+COIN_W, COIN_H = 20, 20
+COIN_SPAWN_MIN, COIN_SPAWN_MAX = 1.1, 2.3
+
 WHITE = (240, 240, 240)
 BLACK = (15, 15, 15)
-BG = (25, 28, 38)
-LANE_BG = [(35, 40, 55), (30, 34, 48)]
+LANE_BG = [(35, 40, 55), (30, 34, 48)]  # translucent tint over assets/background.png, not an opaque fill
 PLAYER_COLORS = [(80, 200, 255), (255, 150, 80)]
 THRUST_COLOR = (255, 220, 90)
 FUEL_BAR_COLOR = (90, 220, 140)
@@ -230,6 +294,12 @@ class Player:
         self.fuel = FUEL_MAX
         self.press_streak = 0
         self._was_held = False
+        self.coins = 0
+        self.vehicle_active = False
+        self.vehicle_kind = None
+        self.vehicle_timer = 0.0
+        self.hit_grace = 0.0
+        self.death_anim_t = 0.0
 
     def rect(self):
         return pygame.Rect(PLAYER_X - PLAYER_SIZE // 2, int(self.y - PLAYER_SIZE // 2),
@@ -237,7 +307,17 @@ class Player:
 
     def update(self, dt, thrust_held, scroll_speed):
         if not self.alive:
+            self.death_anim_t += dt  # keeps ticking so draw_player can play the death animation once
             return
+
+        if self.vehicle_active:
+            self.vehicle_timer -= dt
+            if self.vehicle_timer <= 0.0:
+                self.vehicle_active = False
+                self.vehicle_kind = None
+                self.vehicle_timer = 0.0
+        if self.hit_grace > 0.0:
+            self.hit_grace = max(0.0, self.hit_grace - dt)
 
         just_pressed = thrust_held and not self._was_held
         self._was_held = thrust_held
@@ -263,16 +343,36 @@ class Player:
         self.y += self.vy * dt
 
         top = self.lane_top + PLAYER_SIZE / 2
+        if self.vehicle_active and self.vehicle_kind == "lil_stomper":
+            top = self.lane_top + self.lane_h * STOMPER_CEILING_FRAC  # ground-hugging: can't climb as high
         bottom = self.lane_top + self.lane_h - PLAYER_SIZE / 2
         if self.y < top:
             self.y, self.vy = top, 0.0
         elif self.y > bottom:
             self.y, self.vy = bottom, 0.0
 
-        self.distance += scroll_speed * dt
+        dist_mult = PROFIT_BIRD_DISTANCE_MULT if (self.vehicle_active and self.vehicle_kind == "profit_bird") else 1.0
+        self.distance += scroll_speed * dt * dist_mult
 
     def kill(self):
         self.alive = False
+
+    def activate_vehicle(self, kind):
+        self.vehicle_active = True
+        self.vehicle_kind = kind
+        self.vehicle_timer = VEHICLE_DURATION
+
+    def on_hazard_hit(self):
+        """A vehicle absorbs one hit (knocked out, not killed); otherwise it's fatal."""
+        if self.hit_grace > 0.0:
+            return
+        if self.vehicle_active:
+            self.vehicle_active = False
+            self.vehicle_kind = None
+            self.vehicle_timer = 0.0
+            self.hit_grace = HIT_GRACE_PERIOD
+        else:
+            self.alive = False
 
 
 class Obstacle:
@@ -295,6 +395,78 @@ class Missile:
         return pygame.Rect(int(self.x), int(self.y), int(self.w), int(self.h))
 
 
+class SeekingMissile:
+    """Blinks in place as a telegraph, then launches and gently homes on the player's y.
+
+    Only becomes a live hazard once it's launched (state == "seeking") -- while still
+    blinking it's a visible warning, not yet dangerous, per the "fair warning" ask.
+    """
+    __slots__ = ("x", "y", "w", "h", "vx", "vy", "speed", "state", "blink_timer", "toggle_count", "visible")
+
+    def __init__(self, x, y, w, h, speed):
+        self.x, self.y, self.w, self.h = x, y, w, h
+        self.vx = 0.0
+        self.vy = 0.0
+        self.speed = speed
+        self.state = "telegraph"
+        self.blink_timer = 0.0
+        self.toggle_count = 0
+        self.visible = True
+
+    def rect(self):
+        return pygame.Rect(int(self.x), int(self.y), int(self.w), int(self.h))
+
+    def update(self, dt, target_y):
+        if self.state == "telegraph":
+            self.blink_timer += dt
+            if self.blink_timer >= SEEKER_BLINK_INTERVAL:
+                self.blink_timer -= SEEKER_BLINK_INTERVAL
+                self.visible = not self.visible
+                self.toggle_count += 1
+                if self.toggle_count >= SEEKER_BLINK_COUNT * 2:
+                    self.state = "seeking"
+                    self.visible = True
+                    self.vx = -self.speed
+            return
+
+        # Steer vy towards the player with a clamped turn rate -- a wide enough turn
+        # radius that a last-second move up/down can still dodge it.
+        desired_vy = max(-SEEKER_MAX_VY, min(SEEKER_MAX_VY, (target_y - self.y) * SEEKER_STEER_GAIN))
+        max_delta = SEEKER_TURN_RATE * dt
+        self.vy += max(-max_delta, min(max_delta, desired_vy - self.vy))
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+
+
+class VehicleToken:
+    """A Profit Bird / Lil' Stomper pickup -- grants Player.activate_vehicle() on collect."""
+    __slots__ = ("x", "y", "w", "h", "kind")
+
+    def __init__(self, x, y, w, h, kind):
+        self.x, self.y, self.w, self.h, self.kind = x, y, w, h, kind
+
+    def rect(self):
+        return pygame.Rect(int(self.x), int(self.y), int(self.w), int(self.h))
+
+
+class Coin:
+    __slots__ = ("x", "y", "w", "h")
+
+    def __init__(self, x, y, w, h):
+        self.x, self.y, self.w, self.h = x, y, w, h
+
+    def rect(self):
+        return pygame.Rect(int(self.x), int(self.y), int(self.w), int(self.h))
+
+
+class Explosion:
+    """Purely visual, no collision -- marks where a hazard got detonated by a vehicle pickup."""
+    __slots__ = ("x", "y", "timer")
+
+    def __init__(self, x, y):
+        self.x, self.y, self.timer = x, y, 0.0
+
+
 class Lane:
     """Owns one player's independent obstacle/missile streams, so each run is self-contained."""
 
@@ -311,6 +483,13 @@ class Lane:
         self.missiles = []
         # Grace period before the first missile of a run -- no ramp-up applied yet.
         self.next_missile_in = self.rng.uniform(MISSILE_START_DELAY_MIN, MISSILE_START_DELAY_MAX)
+        self.seekers = []
+        self.next_seeker_in = self.rng.uniform(SEEKER_START_DELAY_MIN, SEEKER_START_DELAY_MAX)
+        self.tokens = []
+        self.next_token_in = self.rng.uniform(TOKEN_SPAWN_MIN, TOKEN_SPAWN_MAX)
+        self.coins = []
+        self.next_coin_in = self.rng.uniform(COIN_SPAWN_MIN, COIN_SPAWN_MAX)
+        self.explosions = []
 
     def _spawn(self):
         w = self.rng.uniform(OBSTACLE_MIN_W, OBSTACLE_MAX_W)
@@ -336,7 +515,62 @@ class Lane:
         self.missiles.append(Missile(float(SCREEN_W), y, MISSILE_W, MISSILE_H, -speed))
         self.next_missile_in = self._next_missile_gap()
 
-    def update(self, dt, alive):
+    def _next_seeker_gap(self):
+        # Same shrinking-gap idea as straight missiles, just rarer and over a wider range.
+        ramp = (self.scroll_speed - SCROLL_SPEED0) / SEEKER_DIFFICULTY_RANGE
+        ramp = min(1.0, max(0.0, ramp))
+        base_gap = SEEKER_SPAWN_MAX - ramp * (SEEKER_SPAWN_MAX - SEEKER_SPAWN_MIN)
+        return base_gap * self.rng.uniform(0.85, 1.15)
+
+    def _spawn_seeker(self):
+        y = self.rng.uniform(self.lane_top, self.lane_top + self.lane_h - SEEKER_H)
+        speed = self.scroll_speed + self.rng.uniform(SEEKER_SPEED_MIN, SEEKER_SPEED_MAX)
+        # Spawns flush against the right edge (not deep off-screen like straight missiles)
+        # so the blink telegraph is actually visible as a warning before it launches.
+        spawn_x = float(SCREEN_W - SEEKER_W)
+        self.seekers.append(SeekingMissile(spawn_x, y, SEEKER_W, SEEKER_H, speed))
+        self.next_seeker_in = self._next_seeker_gap()
+
+    def _spawn_token(self):
+        kind = self.rng.choice(VEHICLE_KINDS)
+        spawn_x = float(SCREEN_W + 40)
+        for _ in range(5):
+            y = self.rng.uniform(self.lane_top, self.lane_top + self.lane_h - TOKEN_H)
+            candidate = pygame.Rect(int(spawn_x), int(y), TOKEN_W, TOKEN_H)
+            blockers = [o.rect().inflate(20, 20) for o in self.obstacles]
+            if not any(candidate.colliderect(b) for b in blockers):
+                self.tokens.append(VehicleToken(spawn_x, y, TOKEN_W, TOKEN_H, kind))
+                break
+        self.next_token_in = self.rng.uniform(TOKEN_SPAWN_MIN, TOKEN_SPAWN_MAX)
+
+    def _spawn_coin(self):
+        spawn_x = float(SCREEN_W + 20)
+        for _ in range(5):
+            y = self.rng.uniform(self.lane_top, self.lane_top + self.lane_h - COIN_H)
+            candidate = pygame.Rect(int(spawn_x), int(y), COIN_W, COIN_H)
+            blockers = ([o.rect().inflate(16, 16) for o in self.obstacles]
+                        + [t.rect().inflate(16, 16) for t in self.tokens])
+            if not any(candidate.colliderect(b) for b in blockers):
+                self.coins.append(Coin(spawn_x, y, COIN_W, COIN_H))
+                break
+        self.next_coin_in = self.rng.uniform(COIN_SPAWN_MIN, COIN_SPAWN_MAX)
+
+    def detonate_hazards(self):
+        """Clears every obstacle/missile/seeker in the lane (triggered by a vehicle
+        pickup) and drops an Explosion VFX at each one's former position. Doesn't touch
+        spawn timers -- future hazards still arrive on schedule, this just clears what's
+        already in flight so the pickup isn't immediately undone."""
+        for obs in self.obstacles:
+            self.explosions.append(Explosion(*obs.rect().center))
+        for m in self.missiles:
+            self.explosions.append(Explosion(*m.rect().center))
+        for s in self.seekers:
+            self.explosions.append(Explosion(*s.rect().center))
+        self.obstacles = []
+        self.missiles = []
+        self.seekers = []
+
+    def update(self, dt, alive, target_y):
         if not alive:
             return  # freeze this lane once its player is out
         self.scroll_speed += SCROLL_ACCEL * dt
@@ -355,12 +589,55 @@ class Lane:
             m.x += m.vx * dt
         self.missiles = [m for m in self.missiles if m.x + m.w > -20]
 
+        self.next_seeker_in -= dt
+        if self.next_seeker_in <= 0:
+            self._spawn_seeker()
+        for s in self.seekers:
+            s.update(dt, target_y)
+        self.seekers = [s for s in self.seekers if s.x + s.w > -20]
+
+        self.next_token_in -= dt
+        if self.next_token_in <= 0:
+            self._spawn_token()
+        for tk in self.tokens:
+            tk.x -= dx
+        self.tokens = [tk for tk in self.tokens if tk.x + tk.w > -20]
+
+        self.next_coin_in -= dt
+        if self.next_coin_in <= 0:
+            self._spawn_coin()
+        for c in self.coins:
+            c.x -= dx
+        self.coins = [c for c in self.coins if c.x + c.w > -20]
+
+        for e in self.explosions:
+            e.timer += dt
+            e.x -= dx  # scrolls along with everything else instead of hanging in place
+        self.explosions = [e for e in self.explosions if e.timer < EXPLOSION_DURATION]
+
     def hazards(self):
-        """All obstacle + missile rects in this lane, for collision checks."""
+        """All obstacle + missile + launched-seeker rects in this lane, for collision checks."""
         for obs in self.obstacles:
             yield obs.rect()
         for m in self.missiles:
             yield m.rect()
+        for s in self.seekers:
+            if s.state == "seeking":
+                yield s.rect()
+
+    def collect_tokens(self, player_rect):
+        """Removes and returns any vehicle tokens overlapping player_rect."""
+        hit = [t for t in self.tokens if player_rect.colliderect(t.rect())]
+        if hit:
+            self.tokens = [t for t in self.tokens if t not in hit]
+        return hit
+
+    def collect_coins(self, player_rect):
+        """Removes and returns any coins overlapping player_rect."""
+        hit = [c for c in self.coins if player_rect.colliderect(c.rect())]
+        if hit:
+            self.coins = [c for c in self.coins if c not in hit]
+        return hit
 
 
 def draw_text_center(surface, text, font, color, center):
@@ -419,21 +696,33 @@ def draw_flame(surface, tip, t):
     pygame.draw.polygon(surface, color, pts)
 
 
-def draw_player(surface, p, t, run_frames, jetpack_frames):
-    """Cycles through the running (grounded) or jetpack (thrusting) animation, facing right."""
-    if p.alive and p.thrusting:
+def draw_player(surface, p, t, run_frames, jetpack_frames, death_frames):
+    """Cycles through running/jetpack while alive; plays the charred-death animation once on death."""
+    if not p.alive:
+        idx = min(int(p.death_anim_t * DEATH_FPS), len(death_frames) - 1)
+        sprite = death_frames[idx]
+        img_rect = sprite.get_rect(center=(PLAYER_X, int(p.y)))
+        surface.blit(sprite, img_rect)
+        return
+
+    if p.thrusting:
         sprite = anim_frame(jetpack_frames, t, JETPACK_FPS, pingpong=True)
     else:
         sprite = anim_frame(run_frames, t, RUN_FPS)
     img_rect = sprite.get_rect(center=(PLAYER_X, int(p.y)))
-    if p.alive and p.thrusting:
+    if p.thrusting:
         flame_tip = (img_rect.left + img_rect.width * 0.32, img_rect.bottom - 3)
         draw_flame(surface, flame_tip, t)
     surface.blit(sprite, img_rect)
-    if not p.alive:
-        dim = pygame.Surface(img_rect.size, pygame.SRCALPHA)
-        dim.fill((110, 110, 120, 255))
-        surface.blit(dim, img_rect.topleft, special_flags=pygame.BLEND_RGB_MULT)
+
+
+def draw_vehicle_player(surface, p, t, frames, fps):
+    """Vehicle-mode sprite swap: Profit Bird passes a single-frame list (static, just
+    bobs); Lil' Stomper passes its 6-frame walk cycle (anim_frame loops it like run_frames)."""
+    sprite = anim_frame(frames, t, fps)
+    bob = math.sin(t * 5) * 3
+    img_rect = sprite.get_rect(center=(PLAYER_X, int(p.y + bob)))
+    surface.blit(sprite, img_rect)
 
 
 def draw_obstacle(surface, obs, sprite):
@@ -449,13 +738,61 @@ def draw_missile(surface, m, sprite):
     surface.blit(sprite, img_rect)
 
 
+def draw_seeking_missile(surface, s):
+    """PLACEHOLDER: primitive chevron -- no seeker-missile sprite yet (see devlog)."""
+    if s.state == "telegraph" and not s.visible:
+        return  # mid-blink "off" phase
+    rect = s.rect()
+    color = (255, 110, 60) if s.state == "telegraph" else (255, 40, 40)
+    cy = rect.centery
+    pts = [(rect.right, cy), (rect.left, rect.top), (rect.left + rect.width * 0.35, cy), (rect.left, rect.bottom)]
+    pygame.draw.polygon(surface, color, pts)
+
+
+def draw_vehicle_token(surface, token, t, sprite):
+    """Vehicle powerup pickup -- assets/vehicle_token.png with a gentle pulse and a per-kind
+    color halo behind it (a flat tint crushes the coin's own gold to a muddy color for
+    blue-ish kinds, since multiply can't add a channel the base image doesn't have)."""
+    pulse = 1.0 + math.sin(t * 6) * 0.08
+    size = (round(sprite.get_width() * pulse), round(sprite.get_height() * pulse))
+    img = pygame.transform.smoothscale(sprite, size)
+    rect = token.rect()
+    halo_radius = max(size) // 2 + 5
+    halo = pygame.Surface((halo_radius * 2, halo_radius * 2), pygame.SRCALPHA)
+    pygame.draw.circle(halo, (*VEHICLE_COLORS[token.kind], 130), (halo_radius, halo_radius), halo_radius)
+    surface.blit(halo, halo.get_rect(center=rect.center))
+    surface.blit(img, img.get_rect(center=rect.center))
+
+
+def draw_coin(surface, coin, t, sprite):
+    """assets/coin_ni_64.png, with a subtle per-coin bob so a run of coins doesn't look static."""
+    cx, cy = coin.rect().center
+    bob = math.sin(t * 4 + coin.x * 0.05) * 2
+    surface.blit(sprite, sprite.get_rect(center=(cx, cy + bob)))
+
+
+def draw_explosion(surface, e):
+    """PLACEHOLDER: primitive expanding ring + fading core -- no blast sprite/particles yet."""
+    progress = min(1.0, e.timer / EXPLOSION_DURATION)
+    radius = max(1, int(EXPLOSION_MAX_RADIUS * progress))
+    alpha = int(255 * (1.0 - progress))
+    if alpha <= 0:
+        return
+    surf = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
+    pygame.draw.circle(surf, (255, 200, 60, alpha), (radius, radius), radius, width=max(2, radius // 4))
+    pygame.draw.circle(surf, (255, 90, 40, alpha), (radius, radius), max(1, int(radius * 0.5)))
+    surface.blit(surf, surf.get_rect(center=(int(e.x), int(e.y))))
+
+
 def load_high_scores():
+    """Entries are (name, distance, coins) -- distance still determines rank; coins just rides along."""
     if not os.path.exists(SCORES_PATH):
         return []
     try:
         with open(SCORES_PATH) as f:
             data = json.load(f)
-        return [(d["name"], d["score"]) for d in data][:MAX_HIGH_SCORES]
+        # .get("coins", 0) so older high_scores.json entries (saved before coins existed) still load.
+        return [(d["name"], d["score"], d.get("coins", 0)) for d in data][:MAX_HIGH_SCORES]
     except Exception as exc:
         print(f"Could not load high scores ({exc}) -- starting with an empty board.")
         return []
@@ -464,13 +801,13 @@ def load_high_scores():
 def save_high_scores(scores):
     try:
         with open(SCORES_PATH, "w") as f:
-            json.dump([{"name": n, "score": s} for n, s in scores], f, indent=2)
+            json.dump([{"name": n, "score": s, "coins": c} for n, s, c in scores], f, indent=2)
     except Exception as exc:
         print(f"Could not save high scores: {exc}")
 
 
 def add_high_scores(scores, entries):
-    """Merges new (name, score) entries in, re-sorts, trims to the top N, and persists."""
+    """Merges new (name, distance, coins) entries in, re-sorts by distance, trims, and persists."""
     merged = scores + entries
     merged.sort(key=lambda entry: entry[1], reverse=True)
     merged = merged[:MAX_HIGH_SCORES]
@@ -479,7 +816,7 @@ def add_high_scores(scores, entries):
 
 
 def draw_high_scores(surface, font_header, font_row, scores):
-    """Top-5 leaderboard, right-aligned in the top-right corner."""
+    """Top-5 leaderboard (ranked by distance, coins shown alongside), right-aligned in the top-right corner."""
     right_x = SCREEN_W - 16
     y = 14
     header = font_header.render("TOP 5", True, WHITE)
@@ -489,8 +826,8 @@ def draw_high_scores(surface, font_header, font_row, scores):
         text = font_row.render("no runs yet", True, (150, 150, 160))
         surface.blit(text, (right_x - text.get_width(), y))
         return
-    for i, (name, score) in enumerate(scores, start=1):
-        text = font_row.render(f"{i}. {name} - {int(score)}m", True, WHITE)
+    for i, (name, score, coins) in enumerate(scores, start=1):
+        text = font_row.render(f"{i}. {name} - {int(score)}m, {coins}c", True, WHITE)
         surface.blit(text, (right_x - text.get_width(), y))
         y += 20
 
@@ -536,8 +873,35 @@ def main():
     run_frames = [run_frames_base, [tinted_sprite(f, p2_tint) for f in run_frames_base]]
     jetpack_frames = [jetpack_frames_base, [tinted_sprite(f, p2_tint) for f in jetpack_frames_base]]
 
+    death_frames = [load_scaled_sprite(os.path.join(ASSET_DIR, f"death_{i:02d}.png"), DEATH_SPRITE_H)
+                     for i in range(DEATH_FRAME_COUNT)]
+
+    # Vehicle-mode sprite swaps -- Profit Bird passed to draw_vehicle_player() as a
+    # single-frame list (static, just bobs); Lil' Stomper as its real 6-frame walk cycle.
+    profit_bird_frames = [load_scaled_sprite(os.path.join(ASSET_DIR, "profit_bird.png"), PROFIT_BIRD_SPRITE_H)]
+    stomper_frames = [load_scaled_sprite(os.path.join(ASSET_DIR, f"lilstomper_{i:02d}.png"), STOMPER_SPRITE_H)
+                       for i in range(STOMPER_FRAME_COUNT)]
+
+    # Vehicle token pickup uses one shared icon (assets/vehicle_token.png) -- kind is
+    # communicated with a color halo (see draw_vehicle_token) rather than tinting the
+    # coin's own pixels, since multiplying a mostly-gold sprite by a blue-ish tint just
+    # crushes it to a muddy gray instead of reading as blue.
+    vehicle_token_sprite = load_scaled_sprite(os.path.join(ASSET_DIR, "vehicle_token.png"), TOKEN_H)
+
+    coin_sprite = load_scaled_sprite(os.path.join(ASSET_DIR, "coin_ni_64.png"), COIN_H)
+
     missile_sprite = load_scaled_sprite(os.path.join(ASSET_DIR, "missile.png"), MISSILE_H + 4)
     obstacle_sprite = pygame.image.load(os.path.join(ASSET_DIR, "obstacle.png")).convert_alpha()
+
+    background_sprite = pygame.image.load(os.path.join(ASSET_DIR, "background.png")).convert()
+    background_sprite = pygame.transform.smoothscale(background_sprite, (SCREEN_W, SCREEN_H))
+    # Translucent per-lane tint over the background -- keeps the two lanes visually
+    # separated and obstacles/text readable without fully hiding the artwork underneath.
+    lane_overlays = []
+    for color in LANE_BG:
+        overlay = pygame.Surface((SCREEN_W, LANE_H), pygame.SRCALPHA)
+        overlay.fill((*color, 165))
+        lane_overlays.append(overlay)
 
     daq = DaqIO()
 
@@ -600,16 +964,24 @@ def main():
 
             for i, p in enumerate(players):
                 p.update(dt, thrust[i], lanes[i].scroll_speed)
-                lanes[i].update(dt, p.alive)
+                lanes[i].update(dt, p.alive, p.y)
                 if p.alive:
                     p_rect = p.rect()
                     if any(p_rect.colliderect(hazard) for hazard in lanes[i].hazards()):
-                        p.kill()
+                        p.on_hazard_hit()
+                    tokens_hit = lanes[i].collect_tokens(p_rect)
+                    for token in tokens_hit:
+                        p.activate_vehicle(token.kind)
+                    if tokens_hit:
+                        # Clears the immediate area so the reward isn't undone by
+                        # something already in flight the instant it's picked up.
+                        lanes[i].detonate_hazards()
+                    p.coins += len(lanes[i].collect_coins(p_rect))
 
             daq.set_leds(thrust[0] and players[0].alive, thrust[1] and players[1].alive)
 
             if all(not p.alive for p in players) and not scores_recorded:
-                entries = [(player_names[i], players[i].distance) for i in range(2)]
+                entries = [(player_names[i], players[i].distance, players[i].coins) for i in range(2)]
                 high_scores = add_high_scores(high_scores, entries)
                 scores_recorded = True
         else:
@@ -617,13 +989,16 @@ def main():
 
         # ---- draw ----
         anim_t = pygame.time.get_ticks() / 1000.0
-        screen.fill(BG)
+        screen.blit(background_sprite, (0, 0))
 
         if state == "enter_names":
+            dim = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+            dim.fill((0, 0, 0, 120))
+            screen.blit(dim, (0, 0))
             draw_name_entry(screen, font_big, font_med, font_small, name_inputs, active_field)
         else:
             for i, lane in enumerate(lanes):
-                pygame.draw.rect(screen, LANE_BG[i], (0, lane.lane_top, SCREEN_W, lane.lane_h))
+                screen.blit(lane_overlays[i], (0, lane.lane_top))
             pygame.draw.line(screen, BLACK, (0, LANE_H), (SCREEN_W, LANE_H), 2)
 
             for i, (lane, p) in enumerate(zip(lanes, players)):
@@ -631,10 +1006,23 @@ def main():
                     draw_obstacle(screen, obs, obstacle_sprite)
                 for m in lane.missiles:
                     draw_missile(screen, m, missile_sprite)
+                for s in lane.seekers:
+                    draw_seeking_missile(screen, s)
+                for c in lane.coins:
+                    draw_coin(screen, c, anim_t, coin_sprite)
+                for tk in lane.tokens:
+                    draw_vehicle_token(screen, tk, anim_t, vehicle_token_sprite)
+                for e in lane.explosions:
+                    draw_explosion(screen, e)
 
-                draw_player(screen, p, anim_t, run_frames[i], jetpack_frames[i])
+                if p.alive and p.vehicle_active and p.vehicle_kind == "profit_bird":
+                    draw_vehicle_player(screen, p, anim_t, profit_bird_frames, 1.0)
+                elif p.alive and p.vehicle_active and p.vehicle_kind == "lil_stomper":
+                    draw_vehicle_player(screen, p, anim_t, stomper_frames, STOMPER_FPS)
+                else:
+                    draw_player(screen, p, anim_t, run_frames[i], jetpack_frames[i], death_frames)
 
-                screen.blit(font_med.render(f"{player_names[i]}: {int(p.distance)} m", True, WHITE),
+                screen.blit(font_med.render(f"{player_names[i]}: {int(p.distance)} m   {p.coins} coins", True, WHITE),
                             (16, lane.lane_top + 12))
 
                 # Fuel bar
@@ -643,6 +1031,17 @@ def main():
                 fill_w = int(bar_w * (p.fuel / FUEL_MAX))
                 if fill_w > 0:
                     pygame.draw.rect(screen, FUEL_BAR_COLOR, (bar_x, bar_y, fill_w, bar_h), border_radius=4)
+
+                # Vehicle-mode timer bar, only shown while active
+                if p.vehicle_active:
+                    vbar_x, vbar_y, vbar_w, vbar_h = 16, lane.lane_top + 64, 140, 8
+                    v_color = VEHICLE_COLORS[p.vehicle_kind]
+                    pygame.draw.rect(screen, FUEL_BAR_EMPTY_COLOR, (vbar_x, vbar_y, vbar_w, vbar_h), border_radius=4)
+                    vfill_w = int(vbar_w * (p.vehicle_timer / VEHICLE_DURATION))
+                    if vfill_w > 0:
+                        pygame.draw.rect(screen, v_color, (vbar_x, vbar_y, vfill_w, vbar_h), border_radius=4)
+                    label = font_small.render(VEHICLE_LABELS[p.vehicle_kind], True, v_color)
+                    screen.blit(label, (vbar_x + vbar_w + 8, vbar_y - 6))
 
                 if not p.alive:
                     draw_text_center(screen, f"{player_names[i]} Down!", font_big, (255, 80, 80),
@@ -664,7 +1063,8 @@ def main():
                 draw_text_center(screen, winner_text, font_med, (255, 220, 90), (SCREEN_W // 2, SCREEN_H // 2 - 45))
                 draw_text_center(
                     screen,
-                    f"{player_names[0]}: {int(d0)} m    {player_names[1]}: {int(d1)} m",
+                    f"{player_names[0]}: {int(d0)} m, {players[0].coins}c    "
+                    f"{player_names[1]}: {int(d1)} m, {players[1].coins}c",
                     font_med, WHITE, (SCREEN_W // 2, SCREEN_H // 2 + 5))
                 draw_text_center(screen, "Press R to play again", font_small, WHITE,
                                   (SCREEN_W // 2, SCREEN_H // 2 + 55))

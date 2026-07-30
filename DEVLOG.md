@@ -238,10 +238,231 @@ Added a proper front-end to the demo instead of jumping straight into play:
   otherwise every subsequent frame of the (static) game-over screen would
   re-append the same scores.
 
+## Phase 10 — Seeking missiles, vehicle power-ups, and coins
+
+Three new systems added on top of the existing `Lane`/`Player`/`Missile`/`Obstacle`
+structure, each following the same "Lane owns its own spawn timer" pattern the
+straight missiles already established.
+
+- **Seeking missiles** (`SeekingMissile`, new class alongside `Missile`): spawn on
+  their own per-lane timer, separate from the straight-missile timer, so both types
+  can appear in the same run without dogpiling the player. Two deliberate difficulty
+  choices to keep them a rarer, later threat: `SEEKER_START_DELAY` (22-30s) is later
+  than the straight-missile start delay (10-15s), and `SEEKER_SPAWN_MIN/MAX` (9-18s)
+  is a noticeably longer gap than straight missiles (2.5-7s), also ramping with
+  `scroll_speed` the same way straight missiles already do.
+  - **Telegraph**: blinks in place 3 times (visible/dim toggle, ~0.27s per half-blink)
+    before launching. One deliberate deviation from the literal ask: it spawns flush
+    against the right edge of the screen (`SCREEN_W - SEEKER_W`) rather than fully
+    off-screen like straight missiles — spawning it off-screen would make the blink
+    warning invisible until it's already moving, defeating the point of a "fair
+    warning." It's also excluded from `Lane.hazards()` entirely while still
+    telegraphing, so it can't collide with anything until it actually launches.
+  - **Homing**: once launched, steers `vy` toward the player's current y with a
+    turn-rate clamp (`SEEKER_TURN_RATE`) rather than snapping straight at them —
+    verified headlessly (see below) that a wide-enough turn radius means it
+    converges smoothly on the target without overshoot/oscillation, and its vertical
+    speed is capped (`SEEKER_MAX_VY = 220`) well under the player's own vertical
+    range (rise/fall speeds 480-640), so a last-second dodge can always outrun it.
+- **Vehicle power-up tokens** (`VehicleToken`, simplified Profit Bird / Lil' Stomper):
+  spawn as collectible orbs on their own timer, with a small placement check against
+  current obstacle positions so they don't land on top of one. Picking one up grants
+  `VEHICLE_DURATION` (6.5s) of invulnerability and a distinct player recolor (see
+  below). Matching how vehicles work in the real game: a hazard hit while a vehicle
+  is active knocks the player out of vehicle mode instead of killing them (one hit
+  "absorbed"), and the mode also ends early if the timer runs out first.
+  - Added a short **hit-grace window** (`HIT_GRACE_PERIOD = 0.5s`) after a vehicle
+    absorbs a hit — not explicitly requested, but without it a wide hazard could hit
+    the player again on the very next frame (before they'd had any chance to react)
+    and kill them immediately after losing the vehicle, which felt like it defeated
+    the "absorbs a hit" promise. Verified headlessly that an immediate repeat hit
+    during grace doesn't kill, and a hit after grace expires (with no vehicle left)
+    does.
+  - Simple physics twists per vehicle, since both were easy to add without touching
+    the core flight model: **Profit Bird** multiplies distance accrual by 1.5x while
+    active (a "speed boost" that doesn't change actual collision physics); **Lil'
+    Stomper** clamps how high the player can climb (`STOMPER_CEILING_FRAC = 0.55` of
+    the lane) for a "ground-hugging" feel.
+  - On-screen indicator: a second small timer bar under the fuel bar, styled the same
+    way, showing time remaining and colored/labeled per vehicle kind.
+- **Coins**: small, frequent collectibles (`Coin`) spawned on their own timer,
+  checked against current obstacle *and* token positions at spawn time so they don't
+  land on top of either. Tracked as a running `Player.coins` counter, separate from
+  `distance` — coins never factor into the distance score.
+  - High-score storage extended from `(name, score)` to `(name, score, coins)` per
+    the "extend the existing entries" option in the ask (simpler than a second
+    leaderboard for a demo). `distance` still determines rank/sort order; `coins`
+    just rides along and is rendered next to it (`"1. Rene - 5735m, 12c"`). Loader
+    uses `d.get("coins", 0)` so the pre-existing `high_scores.json` (saved before
+    this phase, no `"coins"` key) still loads without a migration step.
+
+**Verification**: rather than trusting a live playtest to exercise all three systems
+(a seeker alone takes 22-30s+ to even appear), wrote a headless sim in the same
+style as Phases 4/8 — step a `Lane`/`Player` through 40-45 in-game seconds with
+`SDL_VIDEODRIVER=dummy`, and directly drive `SeekingMissile.update()` /
+`Player.activate_vehicle()` / `Player.on_hazard_hit()` in isolation. Confirmed: the
+blink telegraph fires exactly 3 full blinks (6 toggles) and holds position the whole
+time; the seeker's homing velocity converges on the target without runaway
+oscillation; a vehicle absorbs exactly one hit within its grace window and a
+follow-up hit after grace expires is fatal; and the Stomper ceiling clamp actually
+caps climb height. Also rendered one frame of every new entity type off-screen to
+catch draw-time errors before trusting it visually.
+
+**New sprite assets needed** (all three are currently pygame-primitive placeholders,
+flagged in-code with `PLACEHOLDER` docstrings on `draw_seeking_missile`,
+`draw_vehicle_token`, and `draw_coin`):
+- A seeking-missile sprite (currently a solid-color triangle/chevron).
+- Profit Bird / Lil' Stomper token sprites (currently pulsing colored circles —
+  gold and light-blue respectively).
+- A coin sprite (currently a solid yellow circle).
+- Vehicle-mode player recolor currently reuses the existing run/jetpack frames with
+  a flat tint (same `tinted_sprite()` trick as the player-2 recolor from Phase 7)
+  rather than a real vehicle sprite swap — fine as a placeholder, but a real Profit
+  Bird / Lil' Stomper character swap would read much better.
+  - **Update, Phase 11**: vehicle token, regular coin, Profit Bird, and a proper
+    death animation all got real art. Seeking missiles are the only placeholder
+    left standing.
+
+---
+
+## Phase 11 — Real sprites for tokens, coins, Profit Bird, and death
+
+Swapped four more placeholders for real art, sourced (per direction) from three more
+"Dan the Man" sheets already dropped in the repo root, plus a standalone coin icon:
+
+- **assets/coin_ni_64.png** → the regular per-run `Coin` collectible. Already a clean
+  standalone 64x64 icon, no extraction needed — just loaded and scaled like everything
+  else. Given a subtle per-coin bob (`sin(t*4 + coin.x*0.05)`) so a run of several
+  coins in a row doesn't read as static.
+- **"Dan the Man - Miscellaneous - Coin Counter.png", row 1 sprite 1** → the in-lane
+  `VehicleToken` pickup icon (`assets/vehicle_token.png`), shared by both Profit Bird
+  and Lil' Stomper tokens rather than needing two separate icons.
+- **"Dan the Man - Miscellaneous - Jetpack Joyride Event Cutscenes.png"** → the
+  Profit Bird rider sprite (`assets/profit_bird.png`). The sheet actually has two
+  bird graphics; picked the one with a helmeted rider visible (bbox `(387, 154, 481,
+  219)`) over the plain unmanned bird icon near the top of the sheet, since that's
+  the one that's actually "the profit bird guy." Source faces left — mirrored with
+  `PIL.ImageOps.mirror()` to match the existing right-facing convention (world
+  scrolls left, character faces direction of travel, same reasoning as Phase 6).
+- **"Dan the Man - Miscellaneous - Charred Death Animation.png", row 1, frames 1-4**
+  → `assets/death_00.png..death_03.png`, a black-silhouette-engulfed-in-flame burst.
+  Row 1 (the flaming humanoid, arms-out silhouette) was chosen over row 2 (a
+  black-and-white skeleton character) since it stays visually consistent with the
+  existing player silhouette instead of swapping to an unrelated character design —
+  reads as "caught fire," not "became a different character."
+- Extraction used the same workflow as Phase 6: connected-component detection
+  (`scipy.ndimage.label`, alpha > 10) scoped to a row's y-range, located by first
+  rendering each sheet at 2.5x with a coordinate grid overlay and visually matching
+  the description ("3rd row 5th sprite," "1st row 1st sprite," "1st row, first 4")
+  against the actual content, since these are packed sheets, not a uniform grid.
+
+**Player death**: replaced the old flat gray dim-overlay with the real 4-frame
+animation. Added `Player.death_anim_t`, which starts ticking the moment `alive`
+flips `False` (the `update()` early-return now increments it before returning
+instead of doing nothing) and plays forward once at `DEATH_FPS`, freezing on the
+last (most-charred) frame rather than looping — matches how the jetpack ping-pong
+and run-cycle are already time-driven/stateless, just without the loop-back.
+
+**Profit Bird in vehicle mode**: since there's only one static rider sprite (no
+run/jetpack frame set for it), `draw_vehicle_player()` swaps the player's sprite to
+it entirely while `vehicle_kind == "profit_bird"`, with a small procedural hover bob
+(`sin(t*5)*3`) so it doesn't look frozen — same idea as the flame flicker, driven
+off clock time rather than stored per-player state. Lil' Stomper still has no
+dedicated sprite, so it keeps the Phase-10 tinted-recolor approach.
+
+**Bug found and fixed while wiring this up**: the original plan was to tint
+`vehicle_token.png` per kind the same way the player-2/Stomper recolors work
+(`tinted_sprite()`, i.e. multiply by a flat color). That works fine on the
+run/jetpack sprites (varied skin/clothing tones across all three channels), but
+`vehicle_token.png` is a coin — almost pure gold, with a near-zero blue channel.
+Multiplying a near-zero channel by *anything* still leaves it near zero, so tinting
+it "light blue" for Lil' Stomper didn't read as blue at all — it crushed to a muddy
+olive-gray (`(133, 146, 124)` measured directly from a rendered frame, instead of
+anything resembling the intended `(150, 205, 255)`). Caught this by rendering both
+tokens off-screen and sampling actual pixel colors rather than trusting the code
+alone. Fixed by leaving the coin's own gold color untouched and drawing a
+translucent per-kind color halo *behind* it instead (`draw_vehicle_token`) — Profit
+Bird gets a warm gold halo, Lil' Stomper a clearly-blue one, and the coin art stays
+intact either way.
+
+**Verification**: re-ran the Phase 10 headless gameplay sims unchanged (confirms the
+`draw_player`/`draw_coin`/`draw_vehicle_token` signature changes didn't touch any
+game logic), plus a dedicated offscreen render pass exercising every new sprite path
+(alive/thrusting/dead player, both death-animation extremes, Profit Bird vehicle
+mode, both token kinds, a row of coins) and visually inspected the composited output
+before and after the halo fix.
+
+---
+
+## Phase 12 — Profit Bird fix, Lil' Stomper art, pickup explosions, real background
+
+Four follow-up items from a first look at Phase 11 in the actual game window.
+
+- **Profit Bird was facing backwards.** The Phase 11 mirror was based on "player
+  faces right, so mirror to match" reasoning that turned out wrong once seen
+  in-game — reverted to the sheet's original (un-mirrored, nose-left) orientation,
+  which is what actually reads correctly. Noted here since it contradicts the
+  Phase 11 writeup and the Phase 6 mirroring logic doesn't universally apply to
+  every asset; trust what's on screen over the "should face the same way as the
+  run cycle" assumption.
+- **Lil' Stomper got a real animated sprite.** User supplied two reference images:
+  `LilStomperConcept.webp` (mood-board-style concept art, several inconsistent
+  designs, not laid out as an extractable grid) and `LilStomperConcept2.webp`
+  ("Prototype Lil' Stomper sprite sheet," a clean 2x3 grid of a two-seat mech on
+  a navy background). Used the second one — extracted all 6 frames
+  (`assets/lilstomper_00..05.png`) by keying out the navy background (soft
+  alpha falloff from the sampled background color, not a hard cutoff, for
+  cleaner edges than a plain colorkey) and tightly cropping each cell to its
+  content. These 6 frames show a walking/stomping leg-cycle and are now looped
+  as a real animation (`STOMPER_FPS = 7`, via the existing `anim_frame()` loop
+  path) instead of the old flat-tinted-recolor placeholder. `draw_vehicle_player`
+  was generalized to take a frame list + fps (Profit Bird just passes a
+  single-frame list, so the same function covers both a static swap and a real
+  cycle without two code paths).
+- **Vehicle pickup now detonates nearby hazards.** Ask: getting a vehicle
+  power-up shouldn't immediately get undone by whatever obstacle/missile was
+  already in flight when you grabbed it, but this shouldn't pause or end the
+  run. Implementation: `Lane.detonate_hazards()` clears that lane's current
+  `obstacles`/`missiles`/`seekers` outright (spawn timers are untouched, so
+  future hazards still arrive on schedule) and drops an `Explosion` — a
+  lightweight, collision-free, timer-only entity — at each cleared hazard's
+  former position. Triggered from `main()` right after a token pickup, alongside
+  `Player.activate_vehicle()`. `Explosion` VFX is a primitive expanding
+  ring + fading core (`draw_explosion`, `EXPLOSION_DURATION = 0.45s`) since no
+  blast sprite was supplied — flagged as a placeholder like the seeker missile.
+- **Real background.** `background.jfif` (a desert scene) is loaded once, scaled
+  to fill the screen, and blitted first each frame in place of the old flat
+  `BG` color fill (which is now dead code, removed). The two lanes still need
+  visual separation and obstacles/text still need to read clearly against a much
+  busier image, so the previously-opaque `LANE_BG` rects became translucent
+  overlays (`pygame.SRCALPHA`, alpha 165) blitted over the background instead of
+  replacing it — precomputed once at startup rather than rebuilt every frame.
+  The name-entry screen also got a translucent dark scrim for the same
+  readability reason, since it now sits over the same busy artwork instead of a
+  flat color.
+
+**Verification**: unit-tested `detonate_hazards()` directly (clears all three
+hazard lists, spawns one `Explosion` per cleared hazard, explosions expire and get
+culled after `EXPLOSION_DURATION`), then re-ran the exact pickup→detonate call
+sequence `main()` uses (place a token under the player, collect it, confirm
+`activate_vehicle` + `detonate_hazards` both fire and hazards actually clear) rather
+than only testing the method in isolation. Re-ran the full Phase 10 headless
+gameplay sim unchanged to confirm nothing in the physics/spawn logic regressed.
+Rendered a full composited frame (background + translucent lane tints + both
+explosion stages + Profit Bird + Lil' Stomper) offscreen and inspected it visually
+— background reads well through the tint, both vehicle sprites display correctly,
+Profit Bird's corrected orientation confirmed.
+
 ---
 
 ## Open items / next up
 
-- Homing/tracking missiles (explicitly deferred from the original ask).
+- Homing/tracking missiles — **done, see Phase 10.**
+- Real sprite art for vehicle tokens, coins, Profit Bird, and player death — **done,
+  see Phase 11.**
+- Real sprite art + animation for Lil' Stomper, pickup-triggered hazard clearing,
+  and a real background — **done, see Phase 12.**
+- A seeking-missile sprite and a dedicated explosion-burst sprite/particle effect —
+  still primitive placeholders.
 - Possibly split into multiple files if the project keeps growing — held
   off so far since a single file is easier to hand around for a demo.
