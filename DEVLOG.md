@@ -455,6 +455,81 @@ Profit Bird's corrected orientation confirmed.
 
 ---
 
+## Phase 13 — Five bug reports: air-hover fuel, vehicle controls, restart leak, seeker sprite
+
+A batch of five issues reported after a hands-on playtest, each root-caused and fixed
+independently:
+
+- **Fuel refilled mid-air, letting the base jetpack hover forever.** `Player.update()`
+  regenerated fuel any frame the button wasn't held, with no check on whether the
+  player was actually touching the ground — so a player could stay airborne
+  indefinitely by tapping just enough to never run dry, since fuel quietly topped
+  back up between taps regardless of altitude. Added `Player.on_ground` (computed
+  every frame from the existing floor-clamp check, `self.y >= bottom - 0.5`) and
+  gated fuel regen on it. Verified headlessly: draining fuel fully while holding
+  continuously in the air, then releasing but staying airborne, fuel stays flat at
+  0 until the player actually lands.
+- **Lil' Stomper could float forever, and its controls didn't match the ask.** It was
+  reusing the exact same hold-to-fly physics as the base jetpack (just with a lower
+  climb ceiling), so holding the button simply flew it around like the regular
+  character with no distinct "jump" feel. Rebuilt its control scheme as its own
+  branch in `Player.update()`: a fresh press is an instant upward velocity impulse
+  (`self.vy = -MAX_RISE_SPEED`, i.e. a "long jump" up to the same ceiling normal
+  flight caps at), and holding past that initial jump engages a much weaker
+  `STOMPER_FLOAT_ACCEL` hover assist drawn from its own small tank
+  (`stomper_float_fuel`, `STOMPER_FLOAT_FUEL_MAX = 1.1s`) instead of the base jetpack
+  fuel — independent of the Phase-13 fuel-regen fix above, and only refills while
+  grounded, so holding indefinitely can no longer float forever. A flame now also
+  draws under Lil' Stomper while the float is actually engaged (`draw_vehicle_player`),
+  matching the base character's jetpack flame, so the limited float reads visually.
+  Verified headlessly: a tap imparts an upward impulse, and holding continuously for
+  several seconds straight eventually resumes falling despite the button still being
+  held (the exact "infinite float" bug this reproduces if it regresses).
+- **Profit Bird's movement was wrong** — same hold-to-fly physics as the base
+  character again, not the Flappy-Bird-style hopping that was asked for. Gave it its
+  own branch: each fresh press snaps `vy` outright to `-PROFIT_BIRD_FLAP_SPEED`
+  (standard Flappy Bird physics — a discrete hop, not additive to existing velocity),
+  holding does nothing extra, no fuel involved. Also **coins now auto-collect** while
+  Profit Bird is active — added `Lane.collect_all_coins()` (sweeps every coin in the
+  lane, not just ones overlapping the hitbox) and switched to it in `main()` whenever
+  `vehicle_kind == "profit_bird"`. Verified headlessly: a press snaps velocity to the
+  flap speed regardless of prior vy, holding without a fresh press edge lets gravity
+  resume immediately, and `collect_all_coins()` sweeps a lane clean regardless of
+  player position.
+- **Restarting with R auto-typed an "r" into the name field.** Root cause: pygame
+  generates a `TEXTINPUT` event alongside `KEYDOWN` for any key that produces text,
+  and text-input mode was on for the entire program, including during "playing" — so
+  pressing R to restart both flipped `state` to `"enter_names"` *and* (via the
+  same keypress's `TEXTINPUT` event, processed later in that frame's event queue)
+  appended "r" into whichever name field was active. Fixed at the source rather than
+  by filtering events after the fact: `pygame.key.stop_text_input()` is now called
+  the moment gameplay starts, so SDL never generates a `TEXTINPUT` event for any key
+  pressed during "playing" (R included) in the first place; `start_text_input()` is
+  called again on the way back to the name-entry screen. Per a follow-up ask, restart
+  now also works by **holding both players' buttons down together** once the round is
+  over (`thrust[0] and thrust[1]`, checked right alongside the existing R-key path,
+  both now routed through one `go_to_name_entry()` helper) — covers the keyboard
+  fallback too (SPACE + UP together), not just the DAQ.
+- **Seeking missiles now use real sprite art.** Per the ask, duplicated
+  `assets/missile.png` to `assets/missile_seeker.png` (its own file, so future edits
+  to one don't affect the other) and load it scaled to the seeker's size. The old
+  primitive chevron's telegraph/armed color distinction is preserved by tinting two
+  copies of the sprite (`tinted_sprite` + `lighten`, the same trick already used for
+  Player 2's recolor) — orange while blink-telegraphing, red once launched — and the
+  blink itself (hide on the "off" half-cycle) is untouched. Rendered both states
+  offscreen to confirm the tint reads correctly and the blink-hide path still works.
+
+**Verification**: wrote a headless sim (`SDL_VIDEODRIVER=dummy`) exercising all five
+fixes directly against `Player`/`Lane` methods — grounded-only fuel regen, the Stomper
+jump-then-runs-out-of-float behavior, Profit Bird's discrete-hop physics, the coin
+magnet, and the seeker sprite draw path (including the blink-hidden no-op frame) —
+plus a 3-second live run of the actual `main()` loop under the dummy driver to confirm
+nothing crashes on startup or during normal play. The `TEXTINPUT`-suppression fix
+relies on documented `pygame.key.start_text_input()/stop_text_input()` SDL behavior
+(no `TEXTINPUT` event is generated at all while stopped) rather than something
+reproducible in a headless event-injection test, so worth a quick real keyboard
+playtest to confirm on hardware.
+
 ## Open items / next up
 
 - Homing/tracking missiles — **done, see Phase 10.**
@@ -462,7 +537,7 @@ Profit Bird's corrected orientation confirmed.
   see Phase 11.**
 - Real sprite art + animation for Lil' Stomper, pickup-triggered hazard clearing,
   and a real background — **done, see Phase 12.**
-- A seeking-missile sprite and a dedicated explosion-burst sprite/particle effect —
-  still primitive placeholders.
+- A seeking-missile sprite — **done, see Phase 13.** A dedicated explosion-burst
+  sprite/particle effect is still a primitive placeholder.
 - Possibly split into multiple files if the project keeps growing — held
   off so far since a single file is easier to hand around for a demo.

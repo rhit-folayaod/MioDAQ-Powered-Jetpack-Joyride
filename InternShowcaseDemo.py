@@ -16,7 +16,7 @@ Controls:
     Name entry: type on the keyboard, TAB to switch player field, ENTER to start.
     Player 1: Button 1  (falls back to SPACE only when no DAQ is connected)
     Player 2: Button 2  (falls back to UP ARROW only when no DAQ is connected)
-    R:   once both players are down, returns to name entry to play again
+    R (or both buttons together): once both players are down, returns to name entry to play again
     ESC: quit
 
 Run:
@@ -43,8 +43,8 @@ except ImportError:
 # Sprite art: cropped from the "Dan the Man" asset packs (Playable Characters, Stage
 # Hazards, Jetpack Joyride Event Cutscenes, Coin Counter, Charred Death Animation) plus
 # a standalone coin icon (coin_ni_64.png). Loaded and scaled once in main(). Seeking
-# missiles are the one remaining placeholder -- drawn as a pygame primitive, no sprite
-# yet (see draw_seeking_missile).
+# missiles reuse a tinted duplicate of the straight-missile sprite (assets/missile_seeker.png,
+# see draw_seeking_missile) rather than a primitive shape.
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
 # Persistent (across runs of the program) leaderboard -- a simple JSON file next to
@@ -193,6 +193,19 @@ STOMPER_FRAME_COUNT = 6
 STOMPER_FPS = 7.0
 STOMPER_SPRITE_H = 54
 
+# Lil' Stomper control scheme: a tap is an instant "long jump" impulse (up to the same
+# MAX_RISE_SPEED ceiling normal flight caps at); holding past that initial jump engages
+# the jetpack for a brief, limited float from its own small tank (independent of the
+# base jetpack's FUEL_MAX) instead of flying indefinitely.
+STOMPER_FLOAT_ACCEL = 950.0       # px/s^2 upward while floating -- weaker than THRUST_ACCEL, a hover assist
+STOMPER_FLOAT_FUEL_MAX = 1.1      # seconds of float assist per jump/ground-charge
+STOMPER_FLOAT_REGEN_RATE = STOMPER_FLOAT_FUEL_MAX / 1.0  # only regenerates while grounded
+
+# Profit Bird control scheme: Flappy-Bird-style -- each fresh press is a discrete
+# upward hop (velocity set outright, not additive, same as the genre), no hold-to-fly
+# and no fuel; gravity does the rest between hops.
+PROFIT_BIRD_FLAP_SPEED = 420.0  # px/s upward impulse applied on each fresh press
+
 # Fuel system: holding thrust continuously drains the tank; running dry cuts thrust
 # off (you fall) until it's refilled by letting go. Matches the "~3s of hold" ask.
 FUEL_MAX = 3.0                    # seconds of continuous thrust before empty
@@ -225,7 +238,7 @@ MISSILE_DIFFICULTY_RANGE = 400.0  # scroll_speed increase (px/s) over which spaw
 
 # Seeking missiles: a rarer, later-arriving hazard on its own per-lane timer, independent
 # of the straight-line Missile timer above so both types can appear in the same run.
-# Placeholder box -- no seeker sprite yet, drawn as a primitive triangle (see draw_seeking_missile).
+# Reuses a tinted duplicate of the straight-missile sprite (see draw_seeking_missile).
 SEEKER_W, SEEKER_H = 46, 22
 # Spawns visible at the right edge (not deep off-screen like straight missiles) so the
 # blink telegraph below is actually visible as a warning before it launches.
@@ -300,6 +313,8 @@ class Player:
         self.vehicle_timer = 0.0
         self.hit_grace = 0.0
         self.death_anim_t = 0.0
+        self.on_ground = False
+        self.stomper_float_fuel = STOMPER_FLOAT_FUEL_MAX
 
     def rect(self):
         return pygame.Rect(PLAYER_X - PLAYER_SIZE // 2, int(self.y - PLAYER_SIZE // 2),
@@ -321,37 +336,71 @@ class Player:
 
         just_pressed = thrust_held and not self._was_held
         self._was_held = thrust_held
-        can_thrust = thrust_held and self.fuel > 0.0
+        is_stomper = self.vehicle_active and self.vehicle_kind == "lil_stomper"
+        is_profit_bird = self.vehicle_active and self.vehicle_kind == "profit_bird"
 
-        if just_pressed and can_thrust:
-            self.press_streak += 1
-
-        self.thrusting = can_thrust
-        if can_thrust:
-            idx = min(self.press_streak, len(PRESS_BOOST_MULTIPLIERS)) - 1
-            accel = -THRUST_ACCEL * PRESS_BOOST_MULTIPLIERS[idx]
-            self.fuel = max(0.0, self.fuel - dt)
-        else:
+        if is_stomper:
+            # Tap = an instant "long jump" impulse (capped by the same MAX_RISE_SPEED
+            # clamp below, same ceiling normal flight uses); holding past that initial
+            # jump engages the jetpack for a brief, limited float instead of flying
+            # forever -- its own small tank, separate from the base jetpack fuel.
+            if just_pressed:
+                self.vy = -MAX_RISE_SPEED
+                self.stomper_float_fuel = STOMPER_FLOAT_FUEL_MAX
+            floating = thrust_held and not self.on_ground and self.stomper_float_fuel > 0.0
+            self.thrusting = floating
+            if floating:
+                accel = -STOMPER_FLOAT_ACCEL
+                self.stomper_float_fuel = max(0.0, self.stomper_float_fuel - dt)
+            else:
+                accel = GRAVITY
+        elif is_profit_bird:
+            # Flappy-Bird style: each fresh press is a discrete hop (velocity set
+            # outright, not held/accumulated), no fuel involved.
+            if just_pressed:
+                self.vy = -PROFIT_BIRD_FLAP_SPEED
+            self.thrusting = False
             accel = GRAVITY
-            if not thrust_held:
-                self.fuel = min(FUEL_MAX, self.fuel + FUEL_REGEN_RATE * dt)
-                if self.fuel >= FUEL_MAX:
-                    self.press_streak = 0  # fully rested -- next press starts a new streak
+        else:
+            can_thrust = thrust_held and self.fuel > 0.0
+            if just_pressed and can_thrust:
+                self.press_streak += 1
+
+            self.thrusting = can_thrust
+            if can_thrust:
+                idx = min(self.press_streak, len(PRESS_BOOST_MULTIPLIERS)) - 1
+                accel = -THRUST_ACCEL * PRESS_BOOST_MULTIPLIERS[idx]
+                self.fuel = max(0.0, self.fuel - dt)
+            else:
+                accel = GRAVITY
 
         self.vy += accel * dt
         self.vy = max(-MAX_RISE_SPEED, min(MAX_FALL_SPEED, self.vy))
         self.y += self.vy * dt
 
         top = self.lane_top + PLAYER_SIZE / 2
-        if self.vehicle_active and self.vehicle_kind == "lil_stomper":
+        if is_stomper:
             top = self.lane_top + self.lane_h * STOMPER_CEILING_FRAC  # ground-hugging: can't climb as high
         bottom = self.lane_top + self.lane_h - PLAYER_SIZE / 2
         if self.y < top:
             self.y, self.vy = top, 0.0
         elif self.y > bottom:
             self.y, self.vy = bottom, 0.0
+        self.on_ground = self.y >= bottom - 0.5
 
-        dist_mult = PROFIT_BIRD_DISTANCE_MULT if (self.vehicle_active and self.vehicle_kind == "profit_bird") else 1.0
+        # Base jetpack fuel only refills once actually resting on the lane floor and
+        # not holding -- it used to refill mid-air too, which let a player hover
+        # indefinitely by tapping just enough to stay airborne while fuel quietly
+        # topped back up underneath them.
+        if not is_stomper and not is_profit_bird and not thrust_held and self.on_ground:
+            self.fuel = min(FUEL_MAX, self.fuel + FUEL_REGEN_RATE * dt)
+            if self.fuel >= FUEL_MAX:
+                self.press_streak = 0  # fully rested -- next press starts a new streak
+        if is_stomper and self.on_ground:
+            self.stomper_float_fuel = min(STOMPER_FLOAT_FUEL_MAX,
+                                           self.stomper_float_fuel + STOMPER_FLOAT_REGEN_RATE * dt)
+
+        dist_mult = PROFIT_BIRD_DISTANCE_MULT if is_profit_bird else 1.0
         self.distance += scroll_speed * dt * dist_mult
 
     def kill(self):
@@ -361,6 +410,8 @@ class Player:
         self.vehicle_active = True
         self.vehicle_kind = kind
         self.vehicle_timer = VEHICLE_DURATION
+        if kind == "lil_stomper":
+            self.stomper_float_fuel = STOMPER_FLOAT_FUEL_MAX  # fresh float charge on pickup
 
     def on_hazard_hit(self):
         """A vehicle absorbs one hit (knocked out, not killed); otherwise it's fatal."""
@@ -639,6 +690,13 @@ class Lane:
             self.coins = [c for c in self.coins if c not in hit]
         return hit
 
+    def collect_all_coins(self):
+        """Removes and returns every coin currently in the lane -- Profit Bird's
+        magnet-style auto-collect, instead of requiring exact overlap with the hitbox."""
+        hit = self.coins
+        self.coins = []
+        return hit
+
 
 def draw_text_center(surface, text, font, color, center):
     surf = font.render(text, True, color)
@@ -718,10 +776,15 @@ def draw_player(surface, p, t, run_frames, jetpack_frames, death_frames):
 
 def draw_vehicle_player(surface, p, t, frames, fps):
     """Vehicle-mode sprite swap: Profit Bird passes a single-frame list (static, just
-    bobs); Lil' Stomper passes its 6-frame walk cycle (anim_frame loops it like run_frames)."""
+    bobs); Lil' Stomper passes its 6-frame walk cycle (anim_frame loops it like run_frames).
+    Draws a jetpack flame while Lil' Stomper is actively floating (p.thrusting), same as
+    the base character's jetpack flame, so the limited float is visually legible."""
     sprite = anim_frame(frames, t, fps)
     bob = math.sin(t * 5) * 3
     img_rect = sprite.get_rect(center=(PLAYER_X, int(p.y + bob)))
+    if p.thrusting:
+        flame_tip = (img_rect.left + img_rect.width * 0.32, img_rect.bottom - 3)
+        draw_flame(surface, flame_tip, t)
     surface.blit(sprite, img_rect)
 
 
@@ -738,15 +801,14 @@ def draw_missile(surface, m, sprite):
     surface.blit(sprite, img_rect)
 
 
-def draw_seeking_missile(surface, s):
-    """PLACEHOLDER: primitive chevron -- no seeker-missile sprite yet (see devlog)."""
+def draw_seeking_missile(surface, s, sprite_telegraph, sprite_armed):
+    """Reuses a tinted duplicate of the straight-missile sprite -- orange while
+    blink-telegraphing, red once armed/launched -- keeping the blink warning intact."""
     if s.state == "telegraph" and not s.visible:
         return  # mid-blink "off" phase
-    rect = s.rect()
-    color = (255, 110, 60) if s.state == "telegraph" else (255, 40, 40)
-    cy = rect.centery
-    pts = [(rect.right, cy), (rect.left, rect.top), (rect.left + rect.width * 0.35, cy), (rect.left, rect.bottom)]
-    pygame.draw.polygon(surface, color, pts)
+    sprite = sprite_telegraph if s.state == "telegraph" else sprite_armed
+    img_rect = sprite.get_rect(center=s.rect().center)
+    surface.blit(sprite, img_rect)
 
 
 def draw_vehicle_token(surface, token, t, sprite):
@@ -893,6 +955,13 @@ def main():
     missile_sprite = load_scaled_sprite(os.path.join(ASSET_DIR, "missile.png"), MISSILE_H + 4)
     obstacle_sprite = pygame.image.load(os.path.join(ASSET_DIR, "obstacle.png")).convert_alpha()
 
+    # Seeking missiles: a duplicate of the straight-missile art (assets/missile_seeker.png),
+    # tinted per state so the blink telegraph (orange) vs. armed/launched (red) distinction
+    # from the old placeholder chevron still reads, just on a real sprite now.
+    seeker_sprite_base = load_scaled_sprite(os.path.join(ASSET_DIR, "missile_seeker.png"), SEEKER_H + 6)
+    seeker_sprite_telegraph = tinted_sprite(seeker_sprite_base, lighten((255, 140, 60), 0.35))
+    seeker_sprite_armed = tinted_sprite(seeker_sprite_base, lighten((255, 60, 60), 0.35))
+
     background_sprite = pygame.image.load(os.path.join(ASSET_DIR, "background.png")).convert()
     background_sprite = pygame.transform.smoothscale(background_sprite, (SCREEN_W, SCREEN_H))
     # Translucent per-lane tint over the background -- keeps the two lanes visually
@@ -921,6 +990,19 @@ def main():
     active_field = 0
     scores_recorded = False
     state = "enter_names"  # "enter_names" or "playing" (game-over is just "playing" + both dead)
+    pygame.key.start_text_input()  # on for name entry; turned off during "playing" (see below)
+
+    def go_to_name_entry():
+        # Returning to name entry from game-over (via R or both-buttons-down). Re-enabling
+        # text input here -- rather than leaving it on throughout "playing" -- is what stops
+        # the R keypress that triggers this from also leaking an "r" into the name field:
+        # while text input is off, SDL never generates a TEXTINPUT event for that keypress
+        # in the first place, so there's nothing to leak regardless of event ordering.
+        nonlocal name_inputs, active_field, state
+        name_inputs = [player_names[0], player_names[1]]  # prefilled, quick restart
+        active_field = 0
+        state = "enter_names"
+        pygame.key.start_text_input()
 
     running = True
     while running:
@@ -943,10 +1025,10 @@ def main():
                         reset_game()
                         scores_recorded = False
                         state = "playing"
+                        pygame.key.stop_text_input()  # stops KEYDOWN presses during play (e.g. R) from
+                                                       # also generating a TEXTINPUT event
                 elif state == "playing" and event.key == pygame.K_r and all(not p.alive for p in players):
-                    name_inputs = [player_names[0], player_names[1]]  # prefilled, quick restart
-                    active_field = 0
-                    state = "enter_names"
+                    go_to_name_entry()
             elif event.type == pygame.TEXTINPUT and state == "enter_names":
                 if len(name_inputs[active_field]) < MAX_NAME_LEN:
                     name_inputs[active_field] += event.text
@@ -976,7 +1058,11 @@ def main():
                         # Clears the immediate area so the reward isn't undone by
                         # something already in flight the instant it's picked up.
                         lanes[i].detonate_hazards()
-                    p.coins += len(lanes[i].collect_coins(p_rect))
+                    if p.vehicle_active and p.vehicle_kind == "profit_bird":
+                        # Auto-collect: Profit Bird acts as a coin magnet for its lane.
+                        p.coins += len(lanes[i].collect_all_coins())
+                    else:
+                        p.coins += len(lanes[i].collect_coins(p_rect))
 
             daq.set_leds(thrust[0] and players[0].alive, thrust[1] and players[1].alive)
 
@@ -984,6 +1070,12 @@ def main():
                 entries = [(player_names[i], players[i].distance, players[i].coins) for i in range(2)]
                 high_scores = add_high_scores(high_scores, entries)
                 scores_recorded = True
+
+            # Alternate restart: both players' buttons held down together, once the
+            # round is over -- same trigger as R, for a hands-on-the-buttons restart
+            # that doesn't need reaching for the keyboard.
+            if all(not p.alive for p in players) and thrust[0] and thrust[1]:
+                go_to_name_entry()
         else:
             daq.set_leds(False, False)
 
@@ -1007,7 +1099,7 @@ def main():
                 for m in lane.missiles:
                     draw_missile(screen, m, missile_sprite)
                 for s in lane.seekers:
-                    draw_seeking_missile(screen, s)
+                    draw_seeking_missile(screen, s, seeker_sprite_telegraph, seeker_sprite_armed)
                 for c in lane.coins:
                     draw_coin(screen, c, anim_t, coin_sprite)
                 for tk in lane.tokens:
@@ -1025,10 +1117,15 @@ def main():
                 screen.blit(font_med.render(f"{player_names[i]}: {int(p.distance)} m   {p.coins} coins", True, WHITE),
                             (16, lane.lane_top + 12))
 
-                # Fuel bar
+                # Fuel bar -- shows Lil' Stomper's float-assist charge while that vehicle
+                # is active (its own small tank), otherwise the base jetpack fuel.
+                if p.vehicle_active and p.vehicle_kind == "lil_stomper":
+                    fuel_frac = p.stomper_float_fuel / STOMPER_FLOAT_FUEL_MAX
+                else:
+                    fuel_frac = p.fuel / FUEL_MAX
                 bar_x, bar_y, bar_w, bar_h = 16, lane.lane_top + 46, 140, 10
                 pygame.draw.rect(screen, FUEL_BAR_EMPTY_COLOR, (bar_x, bar_y, bar_w, bar_h), border_radius=4)
-                fill_w = int(bar_w * (p.fuel / FUEL_MAX))
+                fill_w = int(bar_w * fuel_frac)
                 if fill_w > 0:
                     pygame.draw.rect(screen, FUEL_BAR_COLOR, (bar_x, bar_y, fill_w, bar_h), border_radius=4)
 
@@ -1066,7 +1163,7 @@ def main():
                     f"{player_names[0]}: {int(d0)} m, {players[0].coins}c    "
                     f"{player_names[1]}: {int(d1)} m, {players[1].coins}c",
                     font_med, WHITE, (SCREEN_W // 2, SCREEN_H // 2 + 5))
-                draw_text_center(screen, "Press R to play again", font_small, WHITE,
+                draw_text_center(screen, "Press R -- or both buttons -- to play again", font_small, WHITE,
                                   (SCREEN_W // 2, SCREEN_H // 2 + 55))
 
             hint = "DAQ: connected" if daq.available else "DAQ: not found (keyboard-only)"
