@@ -44,7 +44,10 @@ except ImportError:
 # Hazards, Jetpack Joyride Event Cutscenes, Coin Counter, Charred Death Animation) plus
 # a standalone coin icon (coin_ni_64.png). Loaded and scaled once in main(). Seeking
 # missiles reuse a tinted duplicate of the straight-missile sprite (assets/missile_seeker.png,
-# see draw_seeking_missile) rather than a primitive shape.
+# see draw_seeking_missile) rather than a primitive shape. The ground-running scientists
+# (assets/manager_run_00..07.png + manager_down_00..03.png) are built separately by
+# rebuild_manager_sprites.py, which cuts frames out of a scientist sprite sheet and
+# composites a photo head onto each one.
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
 # Persistent (across runs of the program) leaderboard -- a simple JSON file next to
@@ -281,6 +284,38 @@ EXPLOSION_MAX_RADIUS = 34
 COIN_W, COIN_H = 20, 20
 COIN_SPAWN_MIN, COIN_SPAWN_MAX = 1.1, 2.3
 
+# Scientists: ground-running bystanders and a *reward*, not a hazard -- running into one
+# knocks it over for bonus coins and never damages the player. Deliberately kept out of
+# Lane.hazards() (which feeds the kill logic) and collision-checked on their own path.
+SCIENTIST_SPRITE_H = 46   # rendered sprite height; the source frames carry transparent
+                           # padding, so the *visible* scientist lands near the player's size
+SCIENTIST_W, SCIENTIST_H = 22, 34  # collision box, tuned to the visible body rather than the
+                                    # padded canvas -- generous, since catching one is the reward
+# The source frames leave roughly a fifth of the canvas as empty space beneath the feet;
+# the sprite is nudged down by that much at draw time so a ground-anchored scientist
+# actually stands on the lane floor instead of hovering above it (see draw_scientist).
+SCIENTIST_FOOT_PAD = round(SCIENTIST_SPRITE_H * 0.20)
+SCIENTIST_RUN_FRAME_COUNT = 8   # assets/manager_run_00.png .. manager_run_07.png, loops
+SCIENTIST_RUN_FPS = 10.0
+SCIENTIST_DOWN_FRAME_COUNT = 4  # assets/manager_down_00.png .. manager_down_03.png, plays once
+SCIENTIST_DOWN_FPS = 9.0
+# Fraction of the lane's scroll_speed a *running* scientist moves at. Under 1.0, so it
+# travels the same direction as the scroll but slower than the scenery -- i.e. in world
+# terms it's fleeing the same way the player flies, just not fast enough, which is what
+# makes it drift back into the player. Once knocked over it stops running and rides the
+# lane at the full scroll speed like any other scenery.
+SCIENTIST_SPEED_FRAC = 0.75
+SCIENTIST_SPAWN_MIN, SCIENTIST_SPAWN_MAX = 3.5, 7.5  # seconds between spawns, per lane
+SCIENTIST_KNOCKED_HOLD = 0.7   # seconds the final knocked frame holds before despawning
+SCIENTIST_BONUS_COINS = 3      # counted as coins so it feeds the existing coin leaderboard,
+                                # not the distance score
+
+# Floating "+N" feedback popped on a scientist knockdown -- purely visual, lane-owned so
+# it scrolls along with everything else (same as Explosion).
+POPUP_DURATION = 0.7
+POPUP_RISE = 26        # px the text floats upward over its lifetime
+POPUP_COLOR = (255, 220, 90)
+
 WHITE = (240, 240, 240)
 BLACK = (15, 15, 15)
 LANE_BG = [(35, 40, 55), (30, 34, 48)]  # translucent tint over assets/background.png, not an opaque fill
@@ -510,12 +545,57 @@ class Coin:
         return pygame.Rect(int(self.x), int(self.y), int(self.w), int(self.h))
 
 
+class Scientist:
+    """A ground-running bystander -- a reward, not a hazard.
+
+    Simple state machine: "running" -> "knocked" -> despawn. Only "running" scientists
+    are collision-checked (see Lane.knock_over_scientists); once knocked it stops running
+    under its own power, plays the knockdown animation once, holds the final frame for
+    SCIENTIST_KNOCKED_HOLD, then drops out of the lane.
+
+    `anim_t` is the scientist's own elapsed time rather than the global clock, both so
+    each one runs on its own phase instead of in lockstep with every other scientist and
+    because the one-shot knockdown (anim_frame(..., loop=False)) needs time measured from
+    the moment it was knocked over.
+    """
+    __slots__ = ("x", "y", "w", "h", "state", "anim_t")
+
+    def __init__(self, x, y, w, h):
+        self.x, self.y, self.w, self.h = x, y, w, h
+        self.state = "running"
+        self.anim_t = 0.0
+
+    def rect(self):
+        return pygame.Rect(int(self.x), int(self.y), int(self.w), int(self.h))
+
+    def knock_over(self):
+        self.state = "knocked"
+        self.anim_t = 0.0  # restarts the clock so the knockdown plays from frame 0
+
+    def update(self, dt):
+        self.anim_t += dt
+
+    def done(self):
+        """True once the knockdown has finished playing and held its last frame."""
+        if self.state != "knocked":
+            return False
+        return self.anim_t >= SCIENTIST_DOWN_FRAME_COUNT / SCIENTIST_DOWN_FPS + SCIENTIST_KNOCKED_HOLD
+
+
 class Explosion:
     """Purely visual, no collision -- marks where a hazard got detonated by a vehicle pickup."""
     __slots__ = ("x", "y", "timer")
 
     def __init__(self, x, y):
         self.x, self.y, self.timer = x, y, 0.0
+
+
+class ScorePopup:
+    """Purely visual -- a small '+N' that floats up and fades where a bonus was scored."""
+    __slots__ = ("x", "y", "text", "timer")
+
+    def __init__(self, x, y, text):
+        self.x, self.y, self.text, self.timer = x, y, text, 0.0
 
 
 class Lane:
@@ -540,7 +620,12 @@ class Lane:
         self.next_token_in = self.rng.uniform(TOKEN_SPAWN_MIN, TOKEN_SPAWN_MAX)
         self.coins = []
         self.next_coin_in = self.rng.uniform(COIN_SPAWN_MIN, COIN_SPAWN_MAX)
+        self.scientists = []
+        # Own spawn timer, independent of the obstacle/missile/coin ones -- no start
+        # delay, since a scientist is a reward rather than a hazard to ramp up to.
+        self.next_scientist_in = self.rng.uniform(SCIENTIST_SPAWN_MIN, SCIENTIST_SPAWN_MAX)
         self.explosions = []
+        self.popups = []
 
     def _spawn(self):
         w = self.rng.uniform(OBSTACLE_MIN_W, OBSTACLE_MAX_W)
@@ -606,6 +691,20 @@ class Lane:
                 break
         self.next_coin_in = self.rng.uniform(COIN_SPAWN_MIN, COIN_SPAWN_MAX)
 
+    def _spawn_scientist(self):
+        # Ground-anchored: unlike obstacles/coins the y isn't randomized at all -- the
+        # collision box always sits flush on the lane floor (which is exactly where a
+        # grounded player's own box sits, so a player running along the floor connects).
+        y = float(self.lane_top + self.lane_h - SCIENTIST_H)
+        spawn_x = float(SCREEN_W + 30)
+        candidate = pygame.Rect(int(spawn_x), int(y), SCIENTIST_W, SCIENTIST_H)
+        # Same light-touch check the coin/token spawns use -- keeps a scientist from
+        # appearing already embedded in a ground-level obstacle.
+        blockers = [o.rect().inflate(20, 20) for o in self.obstacles]
+        if not any(candidate.colliderect(b) for b in blockers):
+            self.scientists.append(Scientist(spawn_x, y, SCIENTIST_W, SCIENTIST_H))
+        self.next_scientist_in = self.rng.uniform(SCIENTIST_SPAWN_MIN, SCIENTIST_SPAWN_MAX)
+
     def detonate_hazards(self):
         """Clears every obstacle/missile/seeker in the lane (triggered by a vehicle
         pickup) and drops an Explosion VFX at each one's former position. Doesn't touch
@@ -661,13 +760,33 @@ class Lane:
             c.x -= dx
         self.coins = [c for c in self.coins if c.x + c.w > -20]
 
+        self.next_scientist_in -= dt
+        if self.next_scientist_in <= 0:
+            self._spawn_scientist()
+        for sci in self.scientists:
+            sci.update(dt)
+            # A running scientist covers only part of the scroll under its own power, so
+            # it slides left slower than the scenery; a knocked-over one has stopped
+            # running and just rides the lane at the full scroll speed.
+            sci.x -= dx * (SCIENTIST_SPEED_FRAC if sci.state == "running" else 1.0)
+        self.scientists = [s for s in self.scientists if s.x + s.w > -20 and not s.done()]
+
         for e in self.explosions:
             e.timer += dt
             e.x -= dx  # scrolls along with everything else instead of hanging in place
         self.explosions = [e for e in self.explosions if e.timer < EXPLOSION_DURATION]
 
+        for pop in self.popups:
+            pop.timer += dt
+            pop.x -= dx
+        self.popups = [p for p in self.popups if p.timer < POPUP_DURATION]
+
     def hazards(self):
-        """All obstacle + missile + launched-seeker rects in this lane, for collision checks."""
+        """All obstacle + missile + launched-seeker rects in this lane, for collision checks.
+
+        Scientists are deliberately *not* included -- this feeds the kill logic, and they
+        are a reward (see knock_over_scientists for their separate collision path).
+        """
         for obs in self.obstacles:
             yield obs.rect()
         for m in self.missiles:
@@ -688,6 +807,22 @@ class Lane:
         hit = [c for c in self.coins if player_rect.colliderect(c.rect())]
         if hit:
             self.coins = [c for c in self.coins if c not in hit]
+        return hit
+
+    def knock_over_scientists(self, player_rect):
+        """Knocks over and returns any *running* scientists overlapping player_rect.
+
+        Already-knocked ones are skipped, so a single scientist can only ever pay out
+        once no matter how long the player stays on top of it. Drops the "+N" popup here
+        rather than in main() so the lane keeps owning its own VFX, the same way
+        detonate_hazards() spawns its explosions.
+        """
+        hit = [s for s in self.scientists
+               if s.state == "running" and player_rect.colliderect(s.rect())]
+        for s in hit:
+            s.knock_over()
+            cx, cy = s.rect().center
+            self.popups.append(ScorePopup(float(cx), float(cy), f"+{SCIENTIST_BONUS_COINS}"))
         return hit
 
     def collect_all_coins(self):
@@ -730,8 +865,14 @@ def lighten(color, amount):
     return tuple(round(c + (255 - c) * amount) for c in color)
 
 
-def anim_frame(frames, t, fps, pingpong=False):
-    """Picks the current frame surface from `frames` given clock time `t` and playback `fps`."""
+def anim_frame(frames, t, fps, pingpong=False, loop=True):
+    """Picks the current frame surface from `frames` given clock time `t` and playback `fps`.
+
+    With `loop=False` the index clamps to the last frame instead of wrapping, so a one-shot
+    animation (the scientist knockdown) plays through once and then holds on its final
+    frame. In that mode `t` must be time elapsed since the animation started, not global
+    clock time -- otherwise it would already be clamped by the time it was first drawn.
+    """
     n = len(frames)
     if n == 1:
         return frames[0]
@@ -739,8 +880,10 @@ def anim_frame(frames, t, fps, pingpong=False):
         period = 2 * (n - 1)
         i = int(t * fps) % period
         i = i if i < n else period - i
-    else:
+    elif loop:
         i = int(t * fps) % n
+    else:
+        i = min(int(t * fps), n - 1)
     return frames[i]
 
 
@@ -831,6 +974,30 @@ def draw_coin(surface, coin, t, sprite):
     cx, cy = coin.rect().center
     bob = math.sin(t * 4 + coin.x * 0.05) * 2
     surface.blit(sprite, sprite.get_rect(center=(cx, cy + bob)))
+
+
+def draw_scientist(surface, sci, run_frames, down_frames):
+    """Loops the 8-frame run cycle, or plays the 4-frame knockdown once and holds its last
+    frame (loop=False). Driven by the scientist's own anim_t, not the global clock."""
+    if sci.state == "knocked":
+        sprite = anim_frame(down_frames, sci.anim_t, SCIENTIST_DOWN_FPS, loop=False)
+    else:
+        sprite = anim_frame(run_frames, sci.anim_t, SCIENTIST_RUN_FPS)
+    rect = sci.rect()
+    # Pushed down by the frames' built-in transparent footer so the visible feet land on
+    # the lane floor rather than the empty bottom edge of the canvas.
+    surface.blit(sprite, sprite.get_rect(midbottom=(rect.centerx, rect.bottom + SCIENTIST_FOOT_PAD)))
+
+
+def draw_score_popup(surface, popup, font):
+    """Small '+N' that floats upward and fades out over POPUP_DURATION."""
+    progress = min(1.0, popup.timer / POPUP_DURATION)
+    alpha = int(255 * (1.0 - progress * progress))  # holds bright, then drops off late
+    if alpha <= 0:
+        return
+    text = font.render(popup.text, True, POPUP_COLOR)
+    text.set_alpha(alpha)
+    surface.blit(text, text.get_rect(center=(int(popup.x), int(popup.y - POPUP_RISE * progress))))
 
 
 def draw_explosion(surface, e):
@@ -952,6 +1119,15 @@ def main():
 
     coin_sprite = load_scaled_sprite(os.path.join(ASSET_DIR, "coin_ni_64.png"), COIN_H)
 
+    # Scientists are world objects (like obstacles and coins), so unlike the player frames
+    # they aren't tinted per lane -- both lanes share one set.
+    scientist_run_frames = [load_scaled_sprite(os.path.join(ASSET_DIR, f"manager_run_{i:02d}.png"),
+                                                SCIENTIST_SPRITE_H)
+                             for i in range(SCIENTIST_RUN_FRAME_COUNT)]
+    scientist_down_frames = [load_scaled_sprite(os.path.join(ASSET_DIR, f"manager_down_{i:02d}.png"),
+                                                 SCIENTIST_SPRITE_H)
+                              for i in range(SCIENTIST_DOWN_FRAME_COUNT)]
+
     missile_sprite = load_scaled_sprite(os.path.join(ASSET_DIR, "missile.png"), MISSILE_H + 4)
     obstacle_sprite = pygame.image.load(os.path.join(ASSET_DIR, "obstacle.png")).convert_alpha()
 
@@ -1063,6 +1239,11 @@ def main():
                         p.coins += len(lanes[i].collect_all_coins())
                     else:
                         p.coins += len(lanes[i].collect_coins(p_rect))
+                    # Scientists are a reward, so they get their own collision pass rather
+                    # than riding on hazards() above -- running into one only knocks it
+                    # over, never damages the player. Paid out in coins (not distance) so
+                    # the bonus feeds the separate coin leaderboard.
+                    p.coins += len(lanes[i].knock_over_scientists(p_rect)) * SCIENTIST_BONUS_COINS
 
             daq.set_leds(thrust[0] and players[0].alive, thrust[1] and players[1].alive)
 
@@ -1096,6 +1277,8 @@ def main():
             for i, (lane, p) in enumerate(zip(lanes, players)):
                 for obs in lane.obstacles:
                     draw_obstacle(screen, obs, obstacle_sprite)
+                for sci in lane.scientists:
+                    draw_scientist(screen, sci, scientist_run_frames, scientist_down_frames)
                 for m in lane.missiles:
                     draw_missile(screen, m, missile_sprite)
                 for s in lane.seekers:
@@ -1106,6 +1289,8 @@ def main():
                     draw_vehicle_token(screen, tk, anim_t, vehicle_token_sprite)
                 for e in lane.explosions:
                     draw_explosion(screen, e)
+                for pop in lane.popups:
+                    draw_score_popup(screen, pop, font_med)
 
                 if p.alive and p.vehicle_active and p.vehicle_kind == "profit_bird":
                     draw_vehicle_player(screen, p, anim_t, profit_bird_frames, 1.0)

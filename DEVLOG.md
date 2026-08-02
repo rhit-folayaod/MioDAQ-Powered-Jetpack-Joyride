@@ -530,6 +530,89 @@ relies on documented `pygame.key.start_text_input()/stop_text_input()` SDL behav
 reproducible in a headless event-injection test, so worth a quick real keyboard
 playtest to confirm on hardware.
 
+## Phase 14 — Scientists: the Jetpack Joyride knock-over bonus
+
+Added the genre's signature ground-level bystander, the one mechanic that *rewards*
+contact instead of punishing it. Scientists jog along the floor of each lane, and
+running into one bowls it over for bonus coins.
+
+- **`Scientist` class** (`__slots__`, same shape as `Obstacle`/`Missile`) with a
+  three-step state machine: `"running"` → `"knocked"` → despawn. `knock_over()`
+  flips the state and resets `anim_t` to 0 so the knockdown starts from frame 0;
+  `done()` reports when the animation has finished *and* held its last frame for
+  `SCIENTIST_KNOCKED_HOLD` (0.7s), at which point `Lane.update()` filters it out.
+  Each scientist carries its own `anim_t` rather than reading the global clock —
+  the one-shot knockdown needs time measured from the moment of impact (a global
+  clock would already be clamped past the last frame before the first draw), and
+  as a bonus it desynchronises the run cycles so a line of scientists doesn't
+  march in lockstep.
+- **Owned by `Lane`, on its own spawn timer** (`next_scientist_in`,
+  `SCIENTIST_SPAWN_MIN/MAX` = 3.5–7.5s), completely independent of the obstacle,
+  missile, seeker, coin and token timers — same pattern as the missile logic. No
+  start delay, since unlike the hazards there's nothing to ramp up to. Spawns
+  reuse the light-touch blocker check the coin/token spawns already use, so a
+  scientist can't appear pre-embedded in a ground-level obstacle.
+- **Ground-anchored, not randomized.** Unlike obstacles/coins the `y` is fixed to
+  `lane_top + lane_h - SCIENTIST_H`, i.e. the collision box sits flush on the lane
+  floor — exactly where a grounded player's own box sits, so a player running along
+  the floor connects reliably.
+- **Kept out of `Lane.hazards()` on purpose.** That generator feeds the kill logic,
+  so scientists get their own collision pass in `main()` via
+  `Lane.knock_over_scientists()`, which only considers `"running"` ones (an
+  already-knocked scientist can't be re-scored no matter how long the player sits
+  on it) and returns the ones it knocked over. `hazards()`' docstring now says why
+  they're absent, so this doesn't get "helpfully" fixed later. They also survive
+  `detonate_hazards()` — a vehicle pickup shouldn't blow up the reward.
+- **Movement.** A running scientist covers only `SCIENTIST_SPEED_FRAC` (0.75) of the
+  lane's scroll each frame: same direction as the scroll but slower than the
+  scenery, i.e. in world terms it's fleeing the way the player flies and not quite
+  keeping up, which is what drifts it back into the player. Once knocked it stops
+  running and rides the lane at the full scroll speed like any other scenery.
+- **Scoring.** A knockdown pays `SCIENTIST_BONUS_COINS` (3) into `Player.coins`
+  rather than `distance`, so it feeds the existing separate coin leaderboard.
+  Feedback is a `ScorePopup` ("+3" floating up and fading over 0.7s) — a
+  lane-owned, purely-visual object that scrolls with the lane, modelled on
+  `Explosion`. `Lane.knock_over_scientists()` spawns the popup itself, so the lane
+  keeps owning its own VFX the way `detonate_hazards()` does.
+- **`anim_frame()` gained a `loop=False` mode** that clamps the index to the last
+  frame instead of wrapping it with modulo, for one-shot animations. Looping and
+  ping-pong behaviour are untouched.
+
+**Assets.** The run cycle is `assets/manager_run_00..07.png` (8 frames, 10 FPS,
+looping) and the knockdown `assets/manager_down_00..03.png` (4 frames, 9 FPS, played
+once). Both are loaded with the existing `load_scaled_sprite` at a shared
+`SCIENTIST_SPRITE_H`, and unlike the player frames they aren't tinted per lane —
+scientists are world objects, like obstacles and coins, so both lanes share one set.
+The frames `rebuild_manager_sprites.py` produces carry ~20% of their canvas height as
+empty padding beneath the feet (headroom for the composited bobblehead), so
+`draw_scientist()` nudges the sprite down by `SCIENTIST_FOOT_PAD` to land the visible
+feet on the lane floor instead of the blank bottom edge of the canvas. The collision
+box (`SCIENTIST_W/H` = 22×34) is tuned to the visible body rather than the padded
+canvas, and kept slightly generous — catching one is the reward.
+
+**Verification**: 27 headless checks (`SDL_VIDEODRIVER=dummy`) against `Scientist`/
+`Lane` directly — ground anchoring (box flush on the floor, `y` identical across 25
+spawns, overlapping a grounded player), absence from `hazards()`, survival of
+`detonate_hazards()`, the bonus paying once and only once into coins with the player
+left alive and `distance` untouched, the full `running → knocked → hold → despawn`
+timeline (every knockdown frame shown in order, then frame 3 held, then filtered out
+by `Lane.update`), measured per-frame movement confirming a runner covers exactly
+0.75× the scenery's travel while a knocked one matches it 1:1, spawn-timer
+independence from the other four timers, and both draw paths including the clamped
+and fully-faded edge cases. Plus a 421-frame run of the real `main()` loop under the
+dummy driver, which ended with a live player on 3 coins — one knockdown — and still
+alive, and screenshots confirming the feet land on the floor.
+
+**Known art issue**: the four `manager_down_*` frames don't actually depict a
+knockdown. `rebuild_manager_sprites.py`'s `ROW2` crops point at the sprite sheet's
+row 2, which is a standing/fighting idle — so a knocked-over scientist currently
+stands calmly for a second and vanishes. The sheet does contain a real
+fall-to-prone sequence (stumble → double over → collapse → flat on the ground) lower
+down, around `y≈228–262`, with frames near `x≈57–98`, `105–134`, `171–208` and
+`216–262`. Swapping `ROW2` to those coordinates and re-running the script is the
+whole fix; no game code changes, since the mechanic just plays whatever four frames
+are in those files.
+
 ## Open items / next up
 
 - Homing/tracking missiles — **done, see Phase 10.**
@@ -539,5 +622,10 @@ playtest to confirm on hardware.
   and a real background — **done, see Phase 12.**
 - A seeking-missile sprite — **done, see Phase 13.** A dedicated explosion-burst
   sprite/particle effect is still a primitive placeholder.
+- Knock-over scientists — **done, see Phase 14.** Their knockdown frames still need
+  re-cropping from the sheet's actual fall sequence (see the known art issue there);
+  `rebuild_manager_sprites.py` also still points at the sandbox paths it was
+  originally written under (`/mnt/user-data/uploads`, `/home/claude`) rather than
+  local ones, so it needs its three path constants updated before it will re-run.
 - Possibly split into multiple files if the project keeps growing — held
   off so far since a single file is easier to hand around for a demo.
