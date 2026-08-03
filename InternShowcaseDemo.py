@@ -165,6 +165,15 @@ SCREEN_W, SCREEN_H = 1100, 640
 FPS = 60
 LANE_H = SCREEN_H // 2
 
+# Display modes, cycled with F11. The game always renders to a fixed SCREEN_W x SCREEN_H
+# canvas and that canvas is scaled to whatever the window happens to be as the very last
+# step (see present()), so every mode is just a different window size -- no game logic,
+# collision box, spawn coordinate or sprite scale is resolution-aware, and none of them
+# had to change to support this.
+DISPLAY_MODES = ("windowed", "borderless", "fullscreen")
+DISPLAY_MODE_LABELS = {"windowed": "Windowed", "borderless": "Windowed Fullscreen",
+                        "fullscreen": "Fullscreen"}
+
 GRAVITY = 1500.0       # px/s^2, pulls player down
 THRUST_ACCEL = 2400.0  # px/s^2, applied upward while thrusting (base, before boost/fuel)
 MAX_FALL_SPEED = 640.0
@@ -218,26 +227,51 @@ FUEL_REGEN_RATE = FUEL_MAX / 1.5  # refills faster than it drains while button i
 # indexed by how many presses deep into the current "streak" you are (clamped to the
 # last entry beyond that). The streak resets once fuel fully refills, i.e. once you've
 # rested long enough. This rewards a slight first kick and punishes rapid re-tapping,
-# without being so strong that the first press alone rockets you into an obstacle.
+# without being so strong that the first press alone rockets you into a zapper.
 PRESS_BOOST_MULTIPLIERS = [1.2, 1.08, 1.0]
 
-SCROLL_SPEED0 = 260.0  # px/s starting obstacle speed
-SCROLL_ACCEL = 4.0     # px/s^2, obstacles speed up over the run
-OBSTACLE_MIN_GAP, OBSTACLE_MAX_GAP = 260, 420
-OBSTACLE_MIN_W, OBSTACLE_MAX_W = 34, 60
-OBSTACLE_MIN_H, OBSTACLE_MAX_H = 50, 120
+SCROLL_SPEED0 = 260.0  # px/s starting scroll speed
+SCROLL_ACCEL = 4.0     # px/s^2, the lane speeds up over the run
+
+# Zappers: the staple hazard -- an electric beam strung between two emitter nodes,
+# replacing the old single-sprite-stretched-to-a-random-box obstacle. Defined by two
+# endpoints rather than a w/h box, so one class covers vertical, horizontal and diagonal
+# beams at any length, and they spawn in hand-authored *patterns* (ZAPPER_PATTERNS)
+# rather than one at a time -- a field to weave through instead of a row of lone blocks.
+ZAPPER_NODE_FRAME_COUNT = 4    # assets/zapper_node_00..03.png
+ZAPPER_NODE_FPS = 8.0
+ZAPPER_NODE_SIZE = 20          # rendered emitter size (source art is ~20x20)
+ZAPPER_ARC_FRAME_COUNT = 8     # assets/zapper_arc_g2_00..07.png -- the tileable beam segment
+ZAPPER_ARC_FPS = 14.0          # fast, so beams crackle instead of sitting static
+ZAPPER_ARC_H = 16              # rendered beam thickness
+ZAPPER_EDGE_MARGIN = 6         # keeps emitter nodes just inside the lane edges
+# Space left *after* a pattern before the next one begins. Wider than the old
+# per-obstacle gap because a pattern is 150-320px across on its own, so without this the
+# patterns would overlap into an unreadable wall.
+ZAPPER_MIN_GAP, ZAPPER_MAX_GAP = 190, 320
+# Every spawned pattern is verified to leave a vertical opening at least this tall at
+# every x it covers -- enforced in code by pattern_is_passable(), not merely trusted to
+# the authored numbers.
+ZAPPER_MIN_GAP_H = PLAYER_SIZE * 2.5
 
 # Missiles launch from off-screen right and fly straight left (same direction as the
-# obstacle scroll), ignoring the player's position entirely (no tracking, that's a
-# future feature). They never collide with obstacles -- only with players. No missiles
+# lane scroll), ignoring the player's position entirely (no tracking, that's a
+# future feature). They never collide with zappers -- only with players. No missiles
 # for the first 10-15s of a run, and spawn frequency ramps up as scroll_speed climbs.
 MISSILE_W, MISSILE_H = 50, 20  # matches the aspect ratio of the missile sprite art
 # Added on top of the lane's current scroll_speed (not absolute) so missiles always
-# read as clearly faster than the scrolling obstacles, no matter how far into a run.
+# read as clearly faster than the scrolling zappers, no matter how far into a run.
 MISSILE_SPEED_MIN, MISSILE_SPEED_MAX = 240.0, 320.0        # px/s, extra over scroll_speed
 MISSILE_SPAWN_MIN, MISSILE_SPAWN_MAX = 2.5, 7.0            # seconds between spawns, per lane (fast/slow difficulty)
 MISSILE_START_DELAY_MIN, MISSILE_START_DELAY_MAX = 10.0, 15.0  # seconds before the first missile of a run
 MISSILE_DIFFICULTY_RANGE = 400.0  # scroll_speed increase (px/s) over which spawn gap ramps from MAX to MIN
+# Every straight missile is now preceded by an exclamation-point telegraph pinned to the
+# right edge of the lane at the y it will fire from -- the original never fires one
+# unannounced. The missile object doesn't exist at all until the warning elapses, so
+# there is nothing to collide with while it shows.
+MISSILE_WARN_TIME = 1.2           # seconds the telegraph shows before the missile fires
+MISSILE_WARN_W, MISSILE_WARN_H = 26, 30
+MISSILE_WARN_BLINK_HZ = 6.0       # on/off cycles per second
 
 # Seeking missiles: a rarer, later-arriving hazard on its own per-lane timer, independent
 # of the straight-line Missile timer above so both types can appear in the same run.
@@ -273,7 +307,7 @@ HIT_GRACE_PERIOD = 0.5             # seconds of invulnerability right after a ve
                                     # so losing the vehicle can't immediately chain into a fatal hit
                                     # from the same hazard on the very next frame
 
-# Picking up a vehicle token detonates every obstacle/missile/seeker currently in that
+# Picking up a vehicle token detonates every zapper/missile/seeker currently in that
 # lane (Lane.detonate_hazards()) -- doesn't pause or end the run, just clears the
 # immediate area so the reward isn't immediately undone by whatever's already in flight.
 EXPLOSION_DURATION = 0.45  # seconds an individual blast VFX plays for
@@ -282,7 +316,16 @@ EXPLOSION_MAX_RADIUS = 34
 # Coins: small, frequent, non-hazard collectibles -- track a running count per player,
 # separate from the distance score. Uses assets/coin_ni_64.png.
 COIN_W, COIN_H = 20, 20
-COIN_SPAWN_MIN, COIN_SPAWN_MAX = 1.1, 2.3
+COIN_SPACING = 34            # px between coin centres along a formation
+COIN_MIN_COUNT, COIN_MAX_COUNT = 5, 10
+COIN_ARC_HEIGHT_MIN, COIN_ARC_HEIGHT_MAX = 60, 130  # vertical travel of the curved shapes
+COIN_FORMATION_TRIES = 6     # vertical offsets attempted before giving up on a spawn
+# Clear space kept between a coin and a beam. Half the beam's drawn thickness (collision
+# treats a beam as a zero-width segment) plus a visible margin on top.
+COIN_CLEARANCE = ZAPPER_ARC_H // 2 + 7
+# Per *formation* now, not per coin -- a formation is 5-10 coins and up to ~300px long,
+# so the old 1.1-2.3s single-coin cadence would have run them into each other.
+COIN_SPAWN_MIN, COIN_SPAWN_MAX = 3.2, 5.6
 
 # Scientists: ground-running bystanders and a *reward*, not a hazard -- running into one
 # knocks it over for bonus coins and never damages the player. Deliberately kept out of
@@ -461,14 +504,90 @@ class Player:
             self.alive = False
 
 
-class Obstacle:
-    __slots__ = ("x", "y", "w", "h")
+class Zapper:
+    """An electric beam strung between two emitter nodes.
 
-    def __init__(self, x, y, w, h):
-        self.x, self.y, self.w, self.h = x, y, w, h
+    Defined by its two endpoints rather than a w/h box, so a single class covers
+    vertical, horizontal and diagonal beams at any length. Collision is measured against
+    the beam segment itself, never its bounding box: for a diagonal that box covers
+    roughly twice the area the beam visibly occupies, and dying to the empty corner of it
+    reads as a cheat.
+    """
+    __slots__ = ("x0", "y0", "x1", "y1")
+
+    def __init__(self, x0, y0, x1, y1):
+        self.x0, self.y0, self.x1, self.y1 = x0, y0, x1, y1
 
     def rect(self):
-        return pygame.Rect(int(self.x), int(self.y), int(self.w), int(self.h))
+        """Bounding box -- for spawn-blocker checks, culling and explosion placement.
+        Never used for collision; see collides()."""
+        left, right = min(self.x0, self.x1), max(self.x0, self.x1)
+        top, bottom = min(self.y0, self.y1), max(self.y0, self.y1)
+        half = ZAPPER_NODE_SIZE // 2
+        return pygame.Rect(int(left) - half, int(top) - half,
+                            int(right - left) + ZAPPER_NODE_SIZE,
+                            int(bottom - top) + ZAPPER_NODE_SIZE)
+
+    def node_rects(self):
+        half = ZAPPER_NODE_SIZE // 2
+        for x, y in ((self.x0, self.y0), (self.x1, self.y1)):
+            yield pygame.Rect(int(x) - half, int(y) - half, ZAPPER_NODE_SIZE, ZAPPER_NODE_SIZE)
+
+    def collides(self, rect):
+        """Segment-vs-rect (pygame's own exact clipline) plus the two solid emitter nodes.
+
+        The beam counts as zero-width here while it draws ~ZAPPER_ARC_H thick, so the
+        check errs a few pixels in the player's favour -- the right direction to err.
+        """
+        if rect.clipline((int(self.x0), int(self.y0)), (int(self.x1), int(self.y1))):
+            return True
+        return any(rect.colliderect(n) for n in self.node_rects())
+
+    def blocked_y_range(self, xa, xb):
+        """The vertical span this zapper occupies across the column [xa, xb), or None.
+
+        Feeds pattern_is_passable(). Covers the beam (interpolated across the column and
+        padded by its drawn thickness) plus both emitter nodes.
+        """
+        spans = []
+        half_arc = ZAPPER_ARC_H / 2.0
+        half_node = ZAPPER_NODE_SIZE / 2.0
+        left, right = min(self.x0, self.x1), max(self.x0, self.x1)
+        # The x-padding matters for a vertical beam, which has no x-extent of its own --
+        # without it a column sweep could step straight over one and call the lane clear.
+        if xb > left - half_arc and xa < right + half_arc:
+            if abs(self.x1 - self.x0) < 1e-6:
+                ya, yb = min(self.y0, self.y1), max(self.y0, self.y1)
+            else:
+                span = self.x1 - self.x0
+                t0 = max(0.0, min(1.0, (max(xa, left) - self.x0) / span))
+                t1 = max(0.0, min(1.0, (min(xb, right) - self.x0) / span))
+                ea = self.y0 + (self.y1 - self.y0) * t0
+                eb = self.y0 + (self.y1 - self.y0) * t1
+                ya, yb = min(ea, eb), max(ea, eb)
+            spans.append((ya - half_arc, yb + half_arc))
+        for x, y in ((self.x0, self.y0), (self.x1, self.y1)):
+            if xb > x - half_node and xa < x + half_node:
+                spans.append((y - half_node, y + half_node))
+        if not spans:
+            return None
+        return min(s[0] for s in spans), max(s[1] for s in spans)
+
+
+class MissileWarning:
+    """The exclamation-point telegraph that precedes every straight missile.
+
+    Purely visual and deliberately absent from Lane.hazards() -- but more than that, the
+    Missile object isn't constructed until this elapses, so for the whole warning window
+    there is literally nothing in the lane to collide with.
+    """
+    __slots__ = ("y", "timer")
+
+    def __init__(self, y):
+        self.y, self.timer = y, 0.0
+
+    def ready(self):
+        return self.timer >= MISSILE_WARN_TIME
 
 
 class Missile:
@@ -479,6 +598,9 @@ class Missile:
 
     def rect(self):
         return pygame.Rect(int(self.x), int(self.y), int(self.w), int(self.h))
+
+    def collides(self, rect):
+        return rect.colliderect(self.rect())
 
 
 class SeekingMissile:
@@ -501,6 +623,9 @@ class SeekingMissile:
 
     def rect(self):
         return pygame.Rect(int(self.x), int(self.y), int(self.w), int(self.h))
+
+    def collides(self, rect):
+        return rect.colliderect(self.rect())
 
     def update(self, dt, target_y):
         if self.state == "telegraph":
@@ -598,20 +723,203 @@ class ScorePopup:
         self.x, self.y, self.text, self.timer = x, y, text, 0.0
 
 
+def pattern_is_passable(zappers, lane_top, lane_h, step=8):
+    """True if every column a pattern covers leaves an opening of at least ZAPPER_MIN_GAP_H.
+
+    Sweeps the pattern's x-span in `step`-wide columns, merges the y-spans each zapper
+    blocks in that column, and measures the largest remaining gap. `step` is well under
+    the player's height, so no beam can slip between two samples.
+
+    What this guarantees is per-column clearance, not full path connectivity -- proving
+    a route exists would mean pathfinding against the player's climb rate. In practice
+    the authored patterns are all traversable by shape; this is the backstop that catches
+    an unlucky roll walling the lane off, which is the failure that actually matters.
+    """
+    if not zappers:
+        return True
+    x_start = int(min(min(z.x0, z.x1) for z in zappers)) - ZAPPER_NODE_SIZE
+    x_end = int(max(max(z.x0, z.x1) for z in zappers)) + ZAPPER_NODE_SIZE
+    for xa in range(x_start, x_end + 1, step):
+        blocked = [r for r in (z.blocked_y_range(xa, xa + step) for z in zappers) if r]
+        if not blocked:
+            continue
+        blocked.sort()
+        merged = [list(blocked[0])]
+        for lo, hi in blocked[1:]:
+            if lo <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], hi)
+            else:
+                merged.append([lo, hi])
+        widest = 0.0
+        cursor = float(lane_top)
+        for lo, hi in merged:
+            widest = max(widest, lo - cursor)
+            cursor = max(cursor, hi)
+        widest = max(widest, lane_top + lane_h - cursor)
+        if widest < ZAPPER_MIN_GAP_H:
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Zapper patterns. Each builder returns (list_of_zappers, pattern_width_px); Lane._spawn
+# picks one at random per spawn event and advances next_spawn_x by the returned width,
+# so the existing pacing logic keeps working unchanged. Every result is run through
+# pattern_is_passable() before it's accepted.
+# ---------------------------------------------------------------------------
+def _pattern_thread(rng, lane_top, lane_h, x):
+    """A vertical pair sharing one x, with a gap in the middle to thread."""
+    # The two facing emitter nodes each eat ZAPPER_NODE_SIZE/2 of the opening, so the
+    # authored figure has to clear the bar by a whole node before pattern_is_passable()
+    # will accept it -- authoring it as a bare ZAPPER_MIN_GAP_H left only 64px free.
+    gap = ZAPPER_NODE_SIZE + rng.uniform(ZAPPER_MIN_GAP_H * 1.05, ZAPPER_MIN_GAP_H * 1.5)
+    top = lane_top + ZAPPER_EDGE_MARGIN
+    bottom = lane_top + lane_h - ZAPPER_EDGE_MARGIN
+    lo, hi = top + gap / 2, bottom - gap / 2
+    cy = rng.uniform(lo, hi) if hi > lo else lane_top + lane_h / 2
+    return [Zapper(x, top, x, cy - gap / 2),
+            Zapper(x, cy + gap / 2, x, bottom)], 30.0
+
+
+def _pattern_stagger(rng, lane_top, lane_h, x):
+    """A floor-hugging horizontal, then a ceiling-hugging one further along -- forces an
+    up-then-down weave rather than a single altitude change."""
+    span1 = rng.uniform(110, 180)
+    span2 = rng.uniform(110, 180)
+    spacing = rng.uniform(90, 150)
+    y_low = lane_top + lane_h - ZAPPER_EDGE_MARGIN - ZAPPER_NODE_SIZE / 2
+    y_high = lane_top + ZAPPER_EDGE_MARGIN + ZAPPER_NODE_SIZE / 2
+    x2 = x + span1 + spacing
+    return [Zapper(x, y_low, x + span1, y_low),
+            Zapper(x2, y_high, x2 + span2, y_high)], span1 + spacing + span2
+
+
+def _pattern_staircase(rng, lane_top, lane_h, x):
+    """Three diagonals stepping across the lane -- the case a bounding box would badly
+    over-claim, and the reason collision is segment-based."""
+    run = rng.uniform(70, 100)
+    rise = rng.uniform(45, 70)
+    descending = rng.random() < 0.5
+    top = lane_top + ZAPPER_EDGE_MARGIN
+    bottom = lane_top + lane_h - ZAPPER_EDGE_MARGIN
+    y = lane_top + (lane_h * 0.25 if descending else lane_h * 0.75)
+    zappers, cx = [], x
+    for _ in range(3):
+        y2 = max(top, min(bottom, y + rise if descending else y - rise))
+        zappers.append(Zapper(cx, y, cx + run, y2))
+        cx += run + rng.uniform(25, 55)
+        y = y2
+    return zappers, cx - x
+
+
+def _pattern_corridor(rng, lane_top, lane_h, x):
+    """Two long horizontals inset from the ceiling and floor, leaving a channel to fly
+    down the middle."""
+    span = rng.uniform(190, 280)
+    inset = rng.uniform(60, 100)
+    y_top = lane_top + inset
+    y_bot = lane_top + lane_h - inset
+    return [Zapper(x, y_top, x + span, y_top),
+            Zapper(x, y_bot, x + span, y_bot)], span
+
+
+ZAPPER_PATTERNS = (_pattern_thread, _pattern_stagger, _pattern_staircase, _pattern_corridor)
+
+
+def _pattern_fallback(rng, lane_top, lane_h, x):
+    """Emergency path only, if the random rolls somehow fail pattern_is_passable() every
+    attempt: one short floor beam, which cannot wall the lane off by construction."""
+    span = rng.uniform(90, 140)
+    y = lane_top + lane_h - ZAPPER_EDGE_MARGIN - ZAPPER_NODE_SIZE / 2
+    return [Zapper(x, y, x + span, y)], span
+
+
+# ---------------------------------------------------------------------------
+# Coin formations. Each returns a list of n vertical offsets (px, negative = up) to hang
+# off a common baseline; Lane._spawn_coin_formation lays the coins at COIN_SPACING
+# intervals along the offsets. `amp` is the shape's total vertical travel.
+# ---------------------------------------------------------------------------
+def _coin_line(rng, n, amp):
+    """A flat horizontal run."""
+    return [0.0] * n
+
+
+def _coin_arc_up(rng, n, amp):
+    """A hill -- rises to a peak in the middle and comes back down."""
+    return [-amp * math.sin(math.pi * i / (n - 1)) for i in range(n)]
+
+
+def _coin_arc_down(rng, n, amp):
+    """A valley -- the mirror of the hill."""
+    return [amp * math.sin(math.pi * i / (n - 1)) for i in range(n)]
+
+
+def _coin_zigzag(rng, n, amp):
+    """Triangle wave: climbs for `leg` coins, then reverses."""
+    leg = 3
+    step = amp / leg
+    offsets, y, direction = [], 0.0, -1.0
+    for i in range(n):
+        offsets.append(y)
+        y += step * direction
+        if (i + 1) % leg == 0:
+            direction = -direction
+    return offsets
+
+
+def _coin_staircase(rng, n, amp):
+    """Monotonic steps, climbing or descending."""
+    direction = -1.0 if rng.random() < 0.5 else 1.0
+    step = amp / max(1, n - 1)
+    return [direction * step * i for i in range(n)]
+
+
+COIN_FORMATIONS = (_coin_line, _coin_arc_up, _coin_arc_down, _coin_zigzag, _coin_staircase)
+
+
+def coin_is_clear(coin_rect, zappers, tokens=()):
+    """Whether a coin has room where it sits.
+
+    One rule used in both directions -- coins avoid the zappers already in the lane, and
+    a zapper pattern spawning afterwards culls the coins it would land on. Checking only
+    at coin-spawn time isn't enough: coin formations occupy x SCREEN_W+20..+326 while
+    zapper patterns spawn from next_spawn_x (SCREEN_W+100 and up), so the two spawn
+    regions overlap and whichever spawns second used to land on the other.
+
+    Tested against the beam *segment*, not the zapper's bounding box, so coins can still
+    sit in the open space beside a diagonal instead of avoiding the whole box.
+    """
+    padded = coin_rect.inflate(COIN_CLEARANCE * 2, COIN_CLEARANCE * 2)
+    if any(z.collides(padded) for z in zappers):
+        return False
+    return not any(padded.colliderect(t.rect()) for t in tokens)
+
+
 class Lane:
-    """Owns one player's independent obstacle/missile streams, so each run is self-contained."""
+    """Owns one player's independent zapper/missile streams, so each run is self-contained."""
 
     def __init__(self, lane_top, lane_h):
         self.lane_top = lane_top
         self.lane_h = lane_h
         self.rng = random.Random()
+        self.seed = None
         self.reset()
 
-    def reset(self):
-        self.obstacles = []
+    def reset(self, seed=None):
+        """Rebuilds the lane. Passing the same `seed` to both lanes gives both players a
+        byte-identical course, which is the whole point of a head-to-head race: every
+        spawn position and timing is drawn from this rng, so seeding it identically makes
+        skill the only variable. Left unseeded (None) the lane keeps its previous
+        behaviour of an arbitrary course, which is what the headless tests lean on.
+        """
+        self.seed = seed
+        if seed is not None:
+            self.rng.seed(seed)
+        self.zappers = []
         self.next_spawn_x = float(SCREEN_W + 100)
         self.scroll_speed = SCROLL_SPEED0
         self.missiles = []
+        self.missile_warnings = []
         # Grace period before the first missile of a run -- no ramp-up applied yet.
         self.next_missile_in = self.rng.uniform(MISSILE_START_DELAY_MIN, MISSILE_START_DELAY_MAX)
         self.seekers = []
@@ -621,18 +929,33 @@ class Lane:
         self.coins = []
         self.next_coin_in = self.rng.uniform(COIN_SPAWN_MIN, COIN_SPAWN_MAX)
         self.scientists = []
-        # Own spawn timer, independent of the obstacle/missile/coin ones -- no start
+        # Own spawn timer, independent of the zapper/missile/coin ones -- no start
         # delay, since a scientist is a reward rather than a hazard to ramp up to.
         self.next_scientist_in = self.rng.uniform(SCIENTIST_SPAWN_MIN, SCIENTIST_SPAWN_MAX)
         self.explosions = []
         self.popups = []
 
     def _spawn(self):
-        w = self.rng.uniform(OBSTACLE_MIN_W, OBSTACLE_MAX_W)
-        h = self.rng.uniform(OBSTACLE_MIN_H, OBSTACLE_MAX_H)
-        y = self.rng.uniform(self.lane_top, self.lane_top + self.lane_h - h)
-        self.obstacles.append(Obstacle(self.next_spawn_x, y, w, h))
-        self.next_spawn_x += w + self.rng.uniform(OBSTACLE_MIN_GAP, OBSTACLE_MAX_GAP)
+        """Emits one whole *pattern* of zappers, not a single obstacle.
+
+        Rerolls until pattern_is_passable() accepts the result, so the gap guarantee
+        holds no matter what the random parameters come out as; the fallback below only
+        runs if every attempt somehow failed, and cannot block the lane by construction.
+        """
+        for _ in range(8):
+            builder = self.rng.choice(ZAPPER_PATTERNS)
+            zappers, width = builder(self.rng, self.lane_top, self.lane_h, self.next_spawn_x)
+            if pattern_is_passable(zappers, self.lane_top, self.lane_h):
+                break
+        else:
+            zappers, width = _pattern_fallback(self.rng, self.lane_top, self.lane_h,
+                                                self.next_spawn_x)
+        self.zappers.extend(zappers)
+        # The other half of the no-overlap rule: a pattern can spawn into x that a coin
+        # formation already claimed, so drop any coins it lands on. They're still off the
+        # right edge at this point, so nothing visibly vanishes.
+        self.coins = [c for c in self.coins if coin_is_clear(c.rect(), zappers)]
+        self.next_spawn_x += width + self.rng.uniform(ZAPPER_MIN_GAP, ZAPPER_MAX_GAP)
 
     def _next_missile_gap(self):
         # Gap shrinks from MISSILE_SPAWN_MAX towards MISSILE_SPAWN_MIN as scroll_speed
@@ -642,14 +965,21 @@ class Lane:
         base_gap = MISSILE_SPAWN_MAX - ramp * (MISSILE_SPAWN_MAX - MISSILE_SPAWN_MIN)
         return base_gap * self.rng.uniform(0.85, 1.15)
 
-    def _spawn_missile(self):
+    def _spawn_missile_warning(self):
+        """Fires the *telegraph*, not the missile. The missile itself is only constructed
+        once the warning elapses (see update), so nothing exists to hit until then."""
         y = self.rng.uniform(self.lane_top, self.lane_top + self.lane_h - MISSILE_H)
+        self.missile_warnings.append(MissileWarning(y))
+        self.next_missile_in = self._next_missile_gap()
+
+    def _launch_missile(self, y):
         # Speed is scroll_speed-relative, not absolute -- otherwise once scroll_speed
         # (which grows unbounded via SCROLL_ACCEL) exceeds the missile's fixed speed,
-        # missiles would visually crawl backwards relative to the scrolling obstacles.
+        # missiles would visually crawl backwards relative to the scrolling zappers.
+        # Read at launch rather than at warning time so it tracks the speed the lane is
+        # actually running at when the missile appears.
         speed = self.scroll_speed + self.rng.uniform(MISSILE_SPEED_MIN, MISSILE_SPEED_MAX)
         self.missiles.append(Missile(float(SCREEN_W), y, MISSILE_W, MISSILE_H, -speed))
-        self.next_missile_in = self._next_missile_gap()
 
     def _next_seeker_gap(self):
         # Same shrinking-gap idea as straight missiles, just rarer and over a wider range.
@@ -673,50 +1003,67 @@ class Lane:
         for _ in range(5):
             y = self.rng.uniform(self.lane_top, self.lane_top + self.lane_h - TOKEN_H)
             candidate = pygame.Rect(int(spawn_x), int(y), TOKEN_W, TOKEN_H)
-            blockers = [o.rect().inflate(20, 20) for o in self.obstacles]
+            blockers = [z.rect().inflate(20, 20) for z in self.zappers]
             if not any(candidate.colliderect(b) for b in blockers):
                 self.tokens.append(VehicleToken(spawn_x, y, TOKEN_W, TOKEN_H, kind))
                 break
         self.next_token_in = self.rng.uniform(TOKEN_SPAWN_MIN, TOKEN_SPAWN_MAX)
 
-    def _spawn_coin(self):
+    def _spawn_coin_formation(self):
+        """Lays 5-10 coins along one of COIN_FORMATIONS instead of dropping a lone coin.
+
+        A formation traces a path, and the path is bait: following a trail is exactly
+        what pulls a player into a zapper, which is the tension the single random coin
+        never created. Placement is all-or-nothing -- the whole shape has to clear the
+        zappers and tokens already in the lane, since a trail that runs into a beam is
+        indistinguishable from a safe one until it's too late.
+        """
+        shape = self.rng.choice(COIN_FORMATIONS)
+        n = self.rng.randint(COIN_MIN_COUNT, COIN_MAX_COUNT)
+        amp = self.rng.uniform(COIN_ARC_HEIGHT_MIN, COIN_ARC_HEIGHT_MAX)
+        offsets = shape(self.rng, n, amp)
         spawn_x = float(SCREEN_W + 20)
-        for _ in range(5):
-            y = self.rng.uniform(self.lane_top, self.lane_top + self.lane_h - COIN_H)
-            candidate = pygame.Rect(int(spawn_x), int(y), COIN_W, COIN_H)
-            blockers = ([o.rect().inflate(16, 16) for o in self.obstacles]
-                        + [t.rect().inflate(16, 16) for t in self.tokens])
-            if not any(candidate.colliderect(b) for b in blockers):
-                self.coins.append(Coin(spawn_x, y, COIN_W, COIN_H))
-                break
+        # Baseline range that keeps every coin in the shape inside the lane, whatever
+        # its vertical travel -- so a tall arc simply gets a narrower band to sit in
+        # rather than clipping through the ceiling or floor.
+        base_lo = self.lane_top - min(offsets)
+        base_hi = self.lane_top + self.lane_h - COIN_H - max(offsets)
+        if base_hi >= base_lo:
+            for _ in range(COIN_FORMATION_TRIES):
+                base_y = self.rng.uniform(base_lo, base_hi)
+                placed = [Coin(spawn_x + i * COIN_SPACING, base_y + dy, COIN_W, COIN_H)
+                          for i, dy in enumerate(offsets)]
+                if all(coin_is_clear(c.rect(), self.zappers, self.tokens) for c in placed):
+                    self.coins.extend(placed)
+                    break
         self.next_coin_in = self.rng.uniform(COIN_SPAWN_MIN, COIN_SPAWN_MAX)
 
     def _spawn_scientist(self):
-        # Ground-anchored: unlike obstacles/coins the y isn't randomized at all -- the
+        # Ground-anchored: unlike zappers/coins the y isn't randomized at all -- the
         # collision box always sits flush on the lane floor (which is exactly where a
         # grounded player's own box sits, so a player running along the floor connects).
         y = float(self.lane_top + self.lane_h - SCIENTIST_H)
         spawn_x = float(SCREEN_W + 30)
         candidate = pygame.Rect(int(spawn_x), int(y), SCIENTIST_W, SCIENTIST_H)
         # Same light-touch check the coin/token spawns use -- keeps a scientist from
-        # appearing already embedded in a ground-level obstacle.
-        blockers = [o.rect().inflate(20, 20) for o in self.obstacles]
+        # appearing already embedded in a ground-level zapper.
+        blockers = [z.rect().inflate(20, 20) for z in self.zappers]
         if not any(candidate.colliderect(b) for b in blockers):
             self.scientists.append(Scientist(spawn_x, y, SCIENTIST_W, SCIENTIST_H))
         self.next_scientist_in = self.rng.uniform(SCIENTIST_SPAWN_MIN, SCIENTIST_SPAWN_MAX)
 
     def detonate_hazards(self):
-        """Clears every obstacle/missile/seeker in the lane (triggered by a vehicle
+        """Clears every zapper/missile/seeker in the lane (triggered by a vehicle
         pickup) and drops an Explosion VFX at each one's former position. Doesn't touch
         spawn timers -- future hazards still arrive on schedule, this just clears what's
         already in flight so the pickup isn't immediately undone."""
-        for obs in self.obstacles:
-            self.explosions.append(Explosion(*obs.rect().center))
+        for z in self.zappers:
+            self.explosions.append(Explosion(*z.rect().center))
         for m in self.missiles:
             self.explosions.append(Explosion(*m.rect().center))
         for s in self.seekers:
             self.explosions.append(Explosion(*s.rect().center))
-        self.obstacles = []
+        self.zappers = []
         self.missiles = []
         self.seekers = []
 
@@ -725,16 +1072,22 @@ class Lane:
             return  # freeze this lane once its player is out
         self.scroll_speed += SCROLL_ACCEL * dt
         dx = self.scroll_speed * dt
-        for obs in self.obstacles:
-            obs.x -= dx
+        for z in self.zappers:
+            z.x0 -= dx
+            z.x1 -= dx
         self.next_spawn_x -= dx
-        self.obstacles = [o for o in self.obstacles if o.x + o.w > -20]
+        self.zappers = [z for z in self.zappers if z.rect().right > -20]
         while self.next_spawn_x < SCREEN_W + 300:
             self._spawn()
 
         self.next_missile_in -= dt
         if self.next_missile_in <= 0:
-            self._spawn_missile()
+            self._spawn_missile_warning()
+        for w in self.missile_warnings:
+            w.timer += dt
+            if w.ready():
+                self._launch_missile(w.y)
+        self.missile_warnings = [w for w in self.missile_warnings if not w.ready()]
         for m in self.missiles:
             m.x += m.vx * dt
         self.missiles = [m for m in self.missiles if m.x + m.w > -20]
@@ -755,7 +1108,7 @@ class Lane:
 
         self.next_coin_in -= dt
         if self.next_coin_in <= 0:
-            self._spawn_coin()
+            self._spawn_coin_formation()
         for c in self.coins:
             c.x -= dx
         self.coins = [c for c in self.coins if c.x + c.w > -20]
@@ -782,18 +1135,22 @@ class Lane:
         self.popups = [p for p in self.popups if p.timer < POPUP_DURATION]
 
     def hazards(self):
-        """All obstacle + missile + launched-seeker rects in this lane, for collision checks.
+        """Every live zapper/missile/launched-seeker in this lane, for collision checks.
+
+        Yields the hazard *objects* rather than rects: a zapper is a line segment, not a
+        box, so it has to test itself. Every hazard here exposes collides(player_rect),
+        which keeps the kill path a single call site in main().
 
         Scientists are deliberately *not* included -- this feeds the kill logic, and they
         are a reward (see knock_over_scientists for their separate collision path).
         """
-        for obs in self.obstacles:
-            yield obs.rect()
+        for z in self.zappers:
+            yield z
         for m in self.missiles:
-            yield m.rect()
+            yield m
         for s in self.seekers:
             if s.state == "seeking":
-                yield s.rect()
+                yield s
 
     def collect_tokens(self, player_rect):
         """Removes and returns any vehicle tokens overlapping player_rect."""
@@ -831,6 +1188,37 @@ class Lane:
         hit = self.coins
         self.coins = []
         return hit
+
+
+def apply_display_mode(mode, desktop_size):
+    """(Re)creates the window for `mode` and returns the new display surface.
+
+    `desktop_size` is captured once at startup: querying it later would report the
+    current fullscreen window's size instead of the desktop's.
+    """
+    if mode == "fullscreen":
+        return pygame.display.set_mode(desktop_size, pygame.FULLSCREEN)
+    if mode == "borderless":
+        return pygame.display.set_mode(desktop_size, pygame.NOFRAME)
+    return pygame.display.set_mode((SCREEN_W, SCREEN_H), pygame.RESIZABLE)
+
+
+def present(window, canvas):
+    """Scales the fixed-size canvas into the window and flips.
+
+    Scaling is uniform on both axes and the leftover space becomes letterbox bars, so no
+    mode ever stretches the art or crops the playfield -- a 16:9 screen just gets bars
+    beside the 1100x640 (55:32) frame. smoothscale rather than nearest: at the arbitrary
+    non-integer factors an arbitrary window produces, nearest leaves the sprite pixels
+    unevenly sized and the antialiased UI text visibly jagged.
+    """
+    win_w, win_h = window.get_size()
+    scale = min(win_w / SCREEN_W, win_h / SCREEN_H)
+    size = (max(1, round(SCREEN_W * scale)), max(1, round(SCREEN_H * scale)))
+    window.fill(BLACK)
+    frame = canvas if size == (SCREEN_W, SCREEN_H) else pygame.transform.smoothscale(canvas, size)
+    window.blit(frame, frame.get_rect(center=(win_w // 2, win_h // 2)))
+    pygame.display.flip()
 
 
 def draw_text_center(surface, text, font, color, center):
@@ -931,17 +1319,62 @@ def draw_vehicle_player(surface, p, t, frames, fps):
     surface.blit(sprite, img_rect)
 
 
-def draw_obstacle(surface, obs, sprite):
-    """Laser-hazard sprite, stretched to fill this obstacle's own (randomized) box."""
-    rect = obs.rect()
-    img = pygame.transform.scale(sprite, (rect.width, rect.height))
-    surface.blit(img, rect.topleft)
+def draw_zapper(surface, z, t, arc_frames, node_frames):
+    """An emitter node at each end with the animated arc tiled along the segment between.
+
+    The beam is built as a horizontal strip (tiling consecutive arc frames along its
+    length, which reads as travelling crackle rather than one shape flashing in place)
+    and then rotated once to the segment's angle -- far simpler than trying to place
+    each tile along a diagonal, and it costs one rotate per zapper per frame.
+
+    The `z.x0 * 0.013` phase offset is the same trick draw_coin uses: it keeps every
+    beam on screen from crackling in perfect unison.
+    """
+    phase = t + z.x0 * 0.013
+    node = anim_frame(node_frames, phase, ZAPPER_NODE_FPS)
+    dx, dy = z.x1 - z.x0, z.y1 - z.y0
+    length = math.hypot(dx, dy)
+    if length >= 1.0:
+        span = int(length)
+        strip = pygame.Surface((span, ZAPPER_ARC_H), pygame.SRCALPHA)
+        i = int(phase * ZAPPER_ARC_FPS)
+        x = 0
+        while x < span:
+            tile = arc_frames[i % len(arc_frames)]
+            strip.blit(tile, (x, (ZAPPER_ARC_H - tile.get_height()) // 2))
+            x += tile.get_width()
+            i += 1
+        # pygame rotates counter-clockwise, screen y grows downward -- hence the negation.
+        strip = pygame.transform.rotate(strip, -math.degrees(math.atan2(dy, dx)))
+        surface.blit(strip, strip.get_rect(center=(int((z.x0 + z.x1) / 2), int((z.y0 + z.y1) / 2))))
+    for x, y in ((z.x0, z.y0), (z.x1, z.y1)):
+        surface.blit(node, node.get_rect(center=(int(x), int(y))))
 
 
 def draw_missile(surface, m, sprite):
     """Missile sprite -- art already noses left, matching the missile's right-to-left travel."""
     img_rect = sprite.get_rect(center=m.rect().center)
     surface.blit(sprite, img_rect)
+
+
+def draw_missile_warning(surface, warn, t, lane_top, lane_h):
+    """Blinking exclamation-point marker pinned to the right edge of the lane, at the y
+    the missile will fire from. Primitives only, no sprite. Purely visual -- the missile
+    it announces doesn't exist yet, so there is nothing here to collide with."""
+    rect = pygame.Rect(0, 0, MISSILE_WARN_W, MISSILE_WARN_H)
+    cy = int(warn.y + MISSILE_H / 2)
+    # Clamp so a marker for a missile at the very top/bottom of the lane doesn't poke
+    # out into the neighbouring lane.
+    cy = max(lane_top + MISSILE_WARN_H // 2, min(lane_top + lane_h - MISSILE_WARN_H // 2, cy))
+    rect.center = (SCREEN_W - MISSILE_WARN_W // 2 - 4, cy)
+    bright = int(t * MISSILE_WARN_BLINK_HZ) % 2 == 0
+    pygame.draw.rect(surface, (235, 60, 50) if bright else (140, 38, 32), rect, border_radius=5)
+    pygame.draw.rect(surface, WHITE, rect, width=2, border_radius=5)
+    # The "!" -- a stem and a separate dot.
+    bar_w = 4
+    stem_x = rect.centerx - bar_w // 2
+    pygame.draw.rect(surface, WHITE, (stem_x, rect.top + 6, bar_w, MISSILE_WARN_H - 17))
+    pygame.draw.rect(surface, WHITE, (stem_x, rect.bottom - 8, bar_w, bar_w))
 
 
 def draw_seeking_missile(surface, s, sprite_telegraph, sprite_armed):
@@ -1061,7 +1494,7 @@ def draw_high_scores(surface, font_header, font_row, scores):
         y += 20
 
 
-def draw_name_entry(surface, font_big, font_med, font_small, names, active_field):
+def draw_name_entry(surface, font_big, font_med, font_small, names, active_field, display_label):
     draw_text_center(surface, "ENTER PLAYER NAMES", font_big, WHITE, (SCREEN_W // 2, 90))
     box_w, box_h = 340, 48
     for i in range(2):
@@ -1083,12 +1516,20 @@ def draw_name_entry(surface, font_big, font_med, font_small, names, active_field
 
     draw_text_center(surface, "Type a name  -  TAB to switch field  -  ENTER to start",
                       font_small, (170, 170, 180), (SCREEN_W // 2, SCREEN_H - 40))
+    draw_text_center(surface, f"F11: display mode ({display_label})  -  ESC to quit",
+                      font_small, (130, 130, 140), (SCREEN_W // 2, SCREEN_H - 16))
 
 
 def main():
     pygame.init()
     pygame.display.set_caption("Two-Player Jetpack Joyride Demo")
-    screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
+    # Captured before any window exists -- once we're in fullscreen, a display query
+    # would report the window's size rather than the desktop's.
+    desktop_size = pygame.display.get_desktop_sizes()[0]
+    display_mode = DISPLAY_MODES[0]
+    window = apply_display_mode(display_mode, desktop_size)
+    # Everything draws here at a fixed size, whatever the window is doing.
+    canvas = pygame.Surface((SCREEN_W, SCREEN_H))
     clock = pygame.time.Clock()
     font_big = pygame.font.SysFont("consolas", 48, bold=True)
     font_med = pygame.font.SysFont("consolas", 28, bold=True)
@@ -1119,7 +1560,7 @@ def main():
 
     coin_sprite = load_scaled_sprite(os.path.join(ASSET_DIR, "coin_ni_64.png"), COIN_H)
 
-    # Scientists are world objects (like obstacles and coins), so unlike the player frames
+    # Scientists are world objects (like zappers and coins), so unlike the player frames
     # they aren't tinted per lane -- both lanes share one set.
     scientist_run_frames = [load_scaled_sprite(os.path.join(ASSET_DIR, f"manager_run_{i:02d}.png"),
                                                 SCIENTIST_SPRITE_H)
@@ -1129,7 +1570,18 @@ def main():
                               for i in range(SCIENTIST_DOWN_FRAME_COUNT)]
 
     missile_sprite = load_scaled_sprite(os.path.join(ASSET_DIR, "missile.png"), MISSILE_H + 4)
-    obstacle_sprite = pygame.image.load(os.path.join(ASSET_DIR, "obstacle.png")).convert_alpha()
+
+    # Zapper art, cut from the Stage Hazards sheet. The arc frames are the *tileable*
+    # beam segment (uniform 22px source width, seamless butted end-to-end); the other
+    # extracted set on that sheet is the emitter burst, and zapper_full_*.png is a fixed
+    # 118px pre-assembled zapper kept as reference art -- neither is used here, since
+    # building from nodes + a tiled beam is what allows arbitrary length and angle.
+    zapper_node_frames = [load_scaled_sprite(os.path.join(ASSET_DIR, f"zapper_node_{i:02d}.png"),
+                                              ZAPPER_NODE_SIZE)
+                           for i in range(ZAPPER_NODE_FRAME_COUNT)]
+    zapper_arc_frames = [load_scaled_sprite(os.path.join(ASSET_DIR, f"zapper_arc_g2_{i:02d}.png"),
+                                             ZAPPER_ARC_H)
+                          for i in range(ZAPPER_ARC_FRAME_COUNT)]
 
     # Seeking missiles: a duplicate of the straight-missile art (assets/missile_seeker.png),
     # tinted per state so the blink telegraph (orange) vs. armed/launched (red) distinction
@@ -1141,7 +1593,7 @@ def main():
     background_sprite = pygame.image.load(os.path.join(ASSET_DIR, "background.png")).convert()
     background_sprite = pygame.transform.smoothscale(background_sprite, (SCREEN_W, SCREEN_H))
     # Translucent per-lane tint over the background -- keeps the two lanes visually
-    # separated and obstacles/text readable without fully hiding the artwork underneath.
+    # separated and hazards/text readable without fully hiding the artwork underneath.
     lane_overlays = []
     for color in LANE_BG:
         overlay = pygame.Surface((SCREEN_W, LANE_H), pygame.SRCALPHA)
@@ -1154,9 +1606,15 @@ def main():
     players = [Player(0, 0, LANE_H), Player(1, LANE_H, LANE_H)]
     key_map = [pygame.K_SPACE, pygame.K_UP]
 
+    round_seed = None
+
     def reset_game():
+        # One seed per round, shared by both lanes, so the two players race the exact
+        # same course and the result is skill rather than who drew the kinder lane.
+        nonlocal round_seed
+        round_seed = random.randrange(2 ** 31)
         for lane in lanes:
-            lane.reset()
+            lane.reset(round_seed)
         for p in players:
             p.reset()
 
@@ -1187,8 +1645,16 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            elif event.type == pygame.VIDEORESIZE and display_mode == "windowed":
+                window = pygame.display.set_mode(event.size, pygame.RESIZABLE)
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
+                if event.key == pygame.K_F11:
+                    # Cycle windowed -> windowed fullscreen -> fullscreen. Handled before
+                    # the state checks so it works on every screen, including mid-run.
+                    display_mode = DISPLAY_MODES[(DISPLAY_MODES.index(display_mode) + 1)
+                                                  % len(DISPLAY_MODES)]
+                    window = apply_display_mode(display_mode, desktop_size)
+                elif event.key == pygame.K_ESCAPE:
                     running = False
                 elif state == "enter_names":
                     if event.key == pygame.K_BACKSPACE:
@@ -1225,7 +1691,7 @@ def main():
                 lanes[i].update(dt, p.alive, p.y)
                 if p.alive:
                     p_rect = p.rect()
-                    if any(p_rect.colliderect(hazard) for hazard in lanes[i].hazards()):
+                    if any(hazard.collides(p_rect) for hazard in lanes[i].hazards()):
                         p.on_hazard_hit()
                     tokens_hit = lanes[i].collect_tokens(p_rect)
                     for token in tokens_hit:
@@ -1262,44 +1728,47 @@ def main():
 
         # ---- draw ----
         anim_t = pygame.time.get_ticks() / 1000.0
-        screen.blit(background_sprite, (0, 0))
+        canvas.blit(background_sprite, (0, 0))
 
         if state == "enter_names":
             dim = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
             dim.fill((0, 0, 0, 120))
-            screen.blit(dim, (0, 0))
-            draw_name_entry(screen, font_big, font_med, font_small, name_inputs, active_field)
+            canvas.blit(dim, (0, 0))
+            draw_name_entry(canvas, font_big, font_med, font_small, name_inputs, active_field,
+                             DISPLAY_MODE_LABELS[display_mode])
         else:
             for i, lane in enumerate(lanes):
-                screen.blit(lane_overlays[i], (0, lane.lane_top))
-            pygame.draw.line(screen, BLACK, (0, LANE_H), (SCREEN_W, LANE_H), 2)
+                canvas.blit(lane_overlays[i], (0, lane.lane_top))
+            pygame.draw.line(canvas, BLACK, (0, LANE_H), (SCREEN_W, LANE_H), 2)
 
             for i, (lane, p) in enumerate(zip(lanes, players)):
-                for obs in lane.obstacles:
-                    draw_obstacle(screen, obs, obstacle_sprite)
+                for z in lane.zappers:
+                    draw_zapper(canvas, z, anim_t, zapper_arc_frames, zapper_node_frames)
                 for sci in lane.scientists:
-                    draw_scientist(screen, sci, scientist_run_frames, scientist_down_frames)
+                    draw_scientist(canvas, sci, scientist_run_frames, scientist_down_frames)
                 for m in lane.missiles:
-                    draw_missile(screen, m, missile_sprite)
+                    draw_missile(canvas, m, missile_sprite)
+                for w in lane.missile_warnings:
+                    draw_missile_warning(canvas, w, anim_t, lane.lane_top, lane.lane_h)
                 for s in lane.seekers:
-                    draw_seeking_missile(screen, s, seeker_sprite_telegraph, seeker_sprite_armed)
+                    draw_seeking_missile(canvas, s, seeker_sprite_telegraph, seeker_sprite_armed)
                 for c in lane.coins:
-                    draw_coin(screen, c, anim_t, coin_sprite)
+                    draw_coin(canvas, c, anim_t, coin_sprite)
                 for tk in lane.tokens:
-                    draw_vehicle_token(screen, tk, anim_t, vehicle_token_sprite)
+                    draw_vehicle_token(canvas, tk, anim_t, vehicle_token_sprite)
                 for e in lane.explosions:
-                    draw_explosion(screen, e)
+                    draw_explosion(canvas, e)
                 for pop in lane.popups:
-                    draw_score_popup(screen, pop, font_med)
+                    draw_score_popup(canvas, pop, font_med)
 
                 if p.alive and p.vehicle_active and p.vehicle_kind == "profit_bird":
-                    draw_vehicle_player(screen, p, anim_t, profit_bird_frames, 1.0)
+                    draw_vehicle_player(canvas, p, anim_t, profit_bird_frames, 1.0)
                 elif p.alive and p.vehicle_active and p.vehicle_kind == "lil_stomper":
-                    draw_vehicle_player(screen, p, anim_t, stomper_frames, STOMPER_FPS)
+                    draw_vehicle_player(canvas, p, anim_t, stomper_frames, STOMPER_FPS)
                 else:
-                    draw_player(screen, p, anim_t, run_frames[i], jetpack_frames[i], death_frames)
+                    draw_player(canvas, p, anim_t, run_frames[i], jetpack_frames[i], death_frames)
 
-                screen.blit(font_med.render(f"{player_names[i]}: {int(p.distance)} m   {p.coins} coins", True, WHITE),
+                canvas.blit(font_med.render(f"{player_names[i]}: {int(p.distance)} m   {p.coins} coins", True, WHITE),
                             (16, lane.lane_top + 12))
 
                 # Fuel bar -- shows Lil' Stomper's float-assist charge while that vehicle
@@ -1309,24 +1778,24 @@ def main():
                 else:
                     fuel_frac = p.fuel / FUEL_MAX
                 bar_x, bar_y, bar_w, bar_h = 16, lane.lane_top + 46, 140, 10
-                pygame.draw.rect(screen, FUEL_BAR_EMPTY_COLOR, (bar_x, bar_y, bar_w, bar_h), border_radius=4)
+                pygame.draw.rect(canvas, FUEL_BAR_EMPTY_COLOR, (bar_x, bar_y, bar_w, bar_h), border_radius=4)
                 fill_w = int(bar_w * fuel_frac)
                 if fill_w > 0:
-                    pygame.draw.rect(screen, FUEL_BAR_COLOR, (bar_x, bar_y, fill_w, bar_h), border_radius=4)
+                    pygame.draw.rect(canvas, FUEL_BAR_COLOR, (bar_x, bar_y, fill_w, bar_h), border_radius=4)
 
                 # Vehicle-mode timer bar, only shown while active
                 if p.vehicle_active:
                     vbar_x, vbar_y, vbar_w, vbar_h = 16, lane.lane_top + 64, 140, 8
                     v_color = VEHICLE_COLORS[p.vehicle_kind]
-                    pygame.draw.rect(screen, FUEL_BAR_EMPTY_COLOR, (vbar_x, vbar_y, vbar_w, vbar_h), border_radius=4)
+                    pygame.draw.rect(canvas, FUEL_BAR_EMPTY_COLOR, (vbar_x, vbar_y, vbar_w, vbar_h), border_radius=4)
                     vfill_w = int(vbar_w * (p.vehicle_timer / VEHICLE_DURATION))
                     if vfill_w > 0:
-                        pygame.draw.rect(screen, v_color, (vbar_x, vbar_y, vfill_w, vbar_h), border_radius=4)
+                        pygame.draw.rect(canvas, v_color, (vbar_x, vbar_y, vfill_w, vbar_h), border_radius=4)
                     label = font_small.render(VEHICLE_LABELS[p.vehicle_kind], True, v_color)
-                    screen.blit(label, (vbar_x + vbar_w + 8, vbar_y - 6))
+                    canvas.blit(label, (vbar_x + vbar_w + 8, vbar_y - 6))
 
                 if not p.alive:
-                    draw_text_center(screen, f"{player_names[i]} Down!", font_big, (255, 80, 80),
+                    draw_text_center(canvas, f"{player_names[i]} Down!", font_big, (255, 80, 80),
                                       (SCREEN_W // 2, lane.lane_top + lane.lane_h // 2))
 
             if all(not p.alive for p in players):
@@ -1340,23 +1809,29 @@ def main():
 
                 overlay = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
                 overlay.fill((0, 0, 0, 160))
-                screen.blit(overlay, (0, 0))
-                draw_text_center(screen, "GAME OVER", font_big, WHITE, (SCREEN_W // 2, SCREEN_H // 2 - 90))
-                draw_text_center(screen, winner_text, font_med, (255, 220, 90), (SCREEN_W // 2, SCREEN_H // 2 - 45))
+                canvas.blit(overlay, (0, 0))
+                draw_text_center(canvas, "GAME OVER", font_big, WHITE, (SCREEN_W // 2, SCREEN_H // 2 - 90))
+                draw_text_center(canvas, winner_text, font_med, (255, 220, 90), (SCREEN_W // 2, SCREEN_H // 2 - 45))
                 draw_text_center(
-                    screen,
+                    canvas,
                     f"{player_names[0]}: {int(d0)} m, {players[0].coins}c    "
                     f"{player_names[1]}: {int(d1)} m, {players[1].coins}c",
                     font_med, WHITE, (SCREEN_W // 2, SCREEN_H // 2 + 5))
-                draw_text_center(screen, "Press R -- or both buttons -- to play again", font_small, WHITE,
+                draw_text_center(canvas, "Press R -- or both buttons -- to play again", font_small, WHITE,
                                   (SCREEN_W // 2, SCREEN_H // 2 + 55))
+                # Both lanes ran this seed, so it identifies the course both players
+                # raced -- enough to reference or rerun a round later.
+                draw_text_center(canvas, f"seed {round_seed}", font_small, (150, 150, 160),
+                                  (SCREEN_W // 2, SCREEN_H // 2 + 88))
 
             hint = "DAQ: connected" if daq.available else "DAQ: not found (keyboard-only)"
-            screen.blit(font_small.render(hint, True, (160, 160, 160)), (SCREEN_W - 260, SCREEN_H - 28))
+            canvas.blit(font_small.render(hint, True, (160, 160, 160)), (SCREEN_W - 260, SCREEN_H - 28))
+            canvas.blit(font_small.render(f"F11: {DISPLAY_MODE_LABELS[display_mode]}", True,
+                                           (130, 130, 140)), (16, SCREEN_H - 28))
 
-        draw_high_scores(screen, font_small, font_small, high_scores)
+        draw_high_scores(canvas, font_small, font_small, high_scores)
 
-        pygame.display.flip()
+        present(window, canvas)
 
     daq.close()
     pygame.quit()

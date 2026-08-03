@@ -613,6 +613,226 @@ down, around `y≈228–262`, with frames near `x≈57–98`, `105–134`, `171�
 whole fix; no game code changes, since the mechanic just plays whatever four frames
 are in those files.
 
+## Phase 15 — Zappers: replacing the placeholder obstacle with the real thing
+
+The biggest remaining gameplay-feel gap. The old `Obstacle` was one sprite stretched to
+a random width/height and spawned one at a time, which gave a row of isolated blocks.
+Real zappers are electric beams strung between two emitter nodes, they arrive in
+**groups** forming a field you weave through, and they show up at several orientations
+and lengths. `Obstacle` is gone, replaced by `Zapper`.
+
+- **Defined by two endpoints, not a w/h box.** `Zapper(x0, y0, x1, y1)` (`__slots__`,
+  same shape as `Missile`) covers vertical, horizontal and diagonal beams at any
+  length from one class. This is why the pre-assembled `zapper_full_*.png` frames
+  aren't used — they're a fixed 118px assembly, so building from a node pair plus a
+  tiled beam is what buys arbitrary length and angle. They stay in `assets/` as
+  reference art.
+- **Segment collision, not a bounding box.** `Zapper.collides()` uses pygame's own
+  `Rect.clipline()` against the beam segment, plus a box for each solid emitter node.
+  For a 45° diagonal the bounding box covers roughly twice the area the beam visibly
+  occupies, so a bbox check kills you in visibly empty space. The beam counts as
+  zero-width while it draws ~16px thick, which errs a few pixels in the player's
+  favour — the right direction to err.
+- **`Lane.hazards()` now yields hazard *objects* rather than rects.** A zapper is a
+  line segment, not a box, so it has to test itself; `Missile` and `SeekingMissile`
+  gained a matching `collides(rect)`. `main()`'s kill check became
+  `any(hazard.collides(p_rect) for hazard in lanes[i].hazards())`, so the kill path is
+  still exactly one call site rather than splitting into a rect path and a segment
+  path. Scientists remain excluded, and `detonate_hazards()` still clears zappers.
+- **Spawning emits patterns.** `Lane._spawn()` now picks one of four hand-authored
+  builders in `ZAPPER_PATTERNS` per spawn event: `thread` (a vertical pair sharing an
+  x with a gap to fly through), `stagger` (a floor-hugging horizontal then a
+  ceiling-hugging one, forcing an up-then-down weave), `staircase` (three diagonals
+  stepping across the lane — the case a bounding box would badly over-claim), and
+  `corridor` (two long horizontals inset from ceiling and floor, leaving a channel
+  down the middle). Each builder returns its own pixel width, and `next_spawn_x`
+  advances by that width plus `ZAPPER_MIN_GAP..MAX_GAP` (190–320px, widened from the
+  old 260–420 measured off a ~50px obstacle, since a pattern is 150–320px across on
+  its own) — so the existing pacing logic is untouched.
+- **The passable-gap rule is enforced in code, not just authored.**
+  `pattern_is_passable()` sweeps the pattern's x-span in 8px columns (well under the
+  player's height, so no beam can slip between two samples), merges the y-spans each
+  zapper blocks in that column — beam interpolated across the column and padded by its
+  drawn thickness, plus both node boxes — and requires the largest remaining opening to
+  be at least `PLAYER_SIZE * 2.5`. `_spawn()` rerolls up to 8 times, falling back to a
+  single short floor beam that cannot wall the lane off by construction. What this
+  proves is per-column clearance, not full path connectivity; proving a route exists
+  would mean pathfinding against the player's climb rate, and per-column clearance is
+  the bar that catches the failure that actually matters.
+- **This immediately earned its keep.** The check rejected `_pattern_thread` on ~a
+  third of rolls: the two emitter nodes face each other across the gap and each eats
+  `ZAPPER_NODE_SIZE / 2` of it, so an opening authored as `ZAPPER_MIN_GAP_H * 1.05`
+  (84px) left only 64px actually free, under the 80px bar. The authored figure now
+  adds a whole node width on top. That is exactly the bug that would have shipped if
+  the guarantee had been left to the hand-authored numbers.
+- **Animated beams.** `draw_zapper()` builds the beam as a horizontal strip, tiling
+  *consecutive* arc frames along its length (which reads as travelling crackle rather
+  than one shape flashing in place), then rotates the finished strip once to the
+  segment's angle — far simpler than placing each tile along a diagonal, at a cost of
+  one rotate per zapper per frame. Each zapper gets a phase offset from its own x (the
+  same trick `draw_coin` uses) so beams on screen don't crackle in unison.
+
+**Assets.** Cut from the Stage Hazards sheet in the previous step. The beam uses
+`zapper_arc_g2_00..07.png` — the *tileable* set, confirmed by butting the frames
+edge-to-edge and getting one seamless unbroken band (uniform 22px source width); the
+other extracted set is the emitter burst, which butts into separate blobs with gaps and
+is not used here yet. Emitters use the 4-frame `zapper_node_00..03.png`. Both load
+through the existing `load_scaled_sprite`.
+
+**Verification**: 35 headless checks (`SDL_VIDEODRIVER=dummy`) — that the empty corner
+of a diagonal's bbox is *not* a hit while every one of 41 sample points along that same
+diagonal is; hits and misses on vertical and horizontal beams and on the emitter nodes;
+that a full-height wall and a deliberately-64px gap are both rejected while a 110px gap
+is accepted; that no vertical beam slips between column samples (swept across 60
+consecutive x positions); 3000 rolls of each of the four patterns in both lanes all
+passing the gap rule and all emitting 2–4 zappers; that 300 `Lane._spawn()` calls always
+emit a group and always advance `next_spawn_x`; that `hazards()` still feeds the kill
+path, still excludes scientists, still gates telegraphing seekers, and that every
+hazard it yields exposes `collides()`; that `detonate_hazards()` clears zappers and
+drops one explosion each; that both endpoints scroll together so beam shape is
+preserved, and off-screen beams are culled; and that `draw_zapper` handles all
+orientations including a degenerate zero-length beam. Plus a 701-frame run of the real
+`main()` loop, which held a **median frame time of 16.52ms against the 60fps
+(16.67ms) cap** — the per-frame rotate costs nothing measurable — and screenshots
+confirming all four patterns render with correct rotation.
+
+## Phase 16 — Coin formations
+
+Coins used to drop one at a time at a random y every 1.1–2.3s, which made them
+scenery. In the real game they arrive in **formations** that trace a path, and the path
+is bait: following a trail is exactly what pulls you into a zapper. That tension is the
+point, and a lone random coin never created it.
+
+- `_spawn_coin` is replaced by **`_spawn_coin_formation()`**, which picks one of five
+  shapes from `COIN_FORMATIONS` and lays 5–10 coins along it at a uniform
+  `COIN_SPACING` (34px): `line` (flat run), `arc_up` (a hill, sine-shaped, peaking in
+  the middle), `arc_down` (its mirror), `zigzag` (triangle wave, reversing every 3
+  coins) and `staircase` (monotonic steps, up or down). Each shape is a small function
+  returning n vertical offsets to hang off a common baseline, so adding a sixth is a
+  handful of lines.
+- **The whole shape is kept inside the lane** by deriving the legal baseline band from
+  the shape's own vertical travel (`min`/`max` of its offsets) — a tall arc just gets a
+  narrower band to sit in rather than clipping through the ceiling.
+- **Placement is all-or-nothing.** The existing blocker check is kept but applied to
+  every coin in the formation: if any one of them would land in something, the whole
+  formation is re-rolled at a different baseline (`COIN_FORMATION_TRIES` = 6) before
+  the spawn is skipped. A trail that runs into a beam is indistinguishable from a safe
+  one until it's too late, so a partially-placed formation would be worse than none.
+- **Timer lengthened to `COIN_SPAWN_MIN/MAX` = 3.2–5.6s**, now per *formation* rather
+  than per coin — a formation is up to ~300px long, so the old single-coin cadence
+  would have run them into each other.
+- `Player.coins`, `collect_coins()`, `collect_all_coins()` (the Profit Bird magnet) and
+  the leaderboard are all untouched, and there's a test asserting exactly that.
+
+**Verification**: 22 headless checks — shape geometry (arc peaks mid-run and returns to
+baseline, arc_down mirrors it exactly, zigzag reverses more than once, staircase is
+monotonic); no coin escaping the lane across 4000 formations in *both* lanes; every
+formation holding 5–10 coins at exactly uniform x spacing and never a single; the
+blocker check holding against a lane walled with zappers and against tokens; a blocked
+spawn still rearming the timer; the three collection entry points behaving identically
+to before; and `_spawn_coin` being gone from `Lane` entirely.
+
+## Phase 17 — One missile type, with a telegraph
+
+The original has exactly one missile: a warning marker appears at the screen edge for a
+beat, then it fires. The plain `Missile` — no warning, no homing — didn't exist in it.
+Rather than delete a hazard, it now gets the warning half of that treatment while
+staying non-homing, which keeps it distinct from `SeekingMissile`.
+
+- New **`MissileWarning`** (`__slots__`, `y` + `timer`), spawned by
+  `_spawn_missile_warning()` where `_spawn_missile` used to fire directly. When its
+  timer passes `MISSILE_WARN_TIME` (1.2s), `Lane.update` calls `_launch_missile(w.y)`
+  and drops the warning.
+- **Nothing to collide with, by construction.** The warning isn't in `Lane.hazards()`,
+  but more than that: the `Missile` object isn't *built* until the warning elapses, so
+  for the entire telegraph window there is no missile in the lane at all. The class has
+  no `rect()` and no `collides()` — there's no surface to hit it through even by
+  mistake.
+- **The missile inherits the warned `y` exactly**, so the marker genuinely tells you
+  where the missile is coming from rather than being decoration. Speed is still read at
+  *launch* rather than at warning time, keeping it scroll_speed-relative as intended.
+- `draw_missile_warning()` is pygame primitives only — a blinking red rounded rect with
+  a white border and a white "!" (stem plus separate dot), pinned to the right edge of
+  the lane, clamped vertically so a marker for a missile at the very top or bottom of a
+  lane can't poke into the neighbouring one.
+
+**Verification**: 12 headless checks — a warning appearing with no missile alongside it;
+the missile not existing before 1.2s and firing within one frame after; the warning
+being consumed exactly when the missile appears; the missile taking the warned y to the
+bit; the missile still ignoring the player's y after 30 frames with the player parked
+far above it (a homer would climb); a player box swept down the entire right edge across
+the marker never registering a hit; and the marker staying inside its own lane when
+drawn at both lane extremes.
+
+## Phase 18 — One course per round
+
+Both lanes built their own unseeded `random.Random()` and never reseeded, so the two
+players raced completely different courses. For a head-to-head that made the winner
+partly a matter of who drew the kinder lane, and it meant the leaderboard was ranking
+runs that were never comparable.
+
+- `Lane.reset()` takes an optional **`seed`**; `main()` generates one
+  `random.randrange(2**31)` per round in `reset_game()` and passes the same value to
+  both lanes. Every spawn position and timing in a lane is drawn from that one rng, so
+  seeding it identically makes the two courses identical and skill the only variable.
+- Passing no seed keeps the old arbitrary-course behaviour, which the headless tests
+  lean on.
+- The seed is shown small under the restart prompt on the game-over screen, so a round
+  can be referenced or replayed later.
+
+**Verification**: stepping a top-lane and a bottom-lane instance seeded identically
+through 60 in-game seconds and comparing a full course signature every 5 frames —
+zappers, coins, missiles, missile warnings, seekers, tokens and scientists, all in
+lane-relative coordinates — with zero divergence across ~4800 zapper, ~2400 coin, 130
+warning and 480 scientist samples, plus the exact underlying invariant that both lanes'
+rngs finish in an identical state. Different seeds are confirmed to diverge and the same
+seed to replay identically on a fresh lane. (Worth recording: the first version of this
+test failed spuriously. Comparing *absolute* y values meant adding a 320px lane offset
+and taking it back off again, which perturbs the last floating-point bit — a 1.4e-14
+"difference" that was an artifact of the comparison, not the courses. The signature now
+converts to lane-relative before rounding.)
+
+## Phase 19 — Coin/zapper separation, and a scalable display
+
+Two things from a play session.
+
+- **Coins could still clip into beams.** The cause was spawn ordering, not the check
+  itself: coin formations occupy x `SCREEN_W+20..+326` while zapper patterns spawn from
+  `next_spawn_x` (`SCREEN_W+100` and up), so the two spawn regions overlap in x and
+  whichever spawned *second* landed on the other. Coins checked the zappers that existed
+  at the time; a pattern spawning afterwards had no coin check at all. Fixed in both
+  directions with one shared predicate, `coin_is_clear()`: formations avoid existing
+  zappers, and `_spawn()` culls any coins its new pattern lands on. Culled coins are
+  always still off the right edge at that moment, so nothing visibly vanishes. The test
+  asserts that specifically. The rule also now tests against the beam **segment** rather
+  than the zapper's bounding box, so coins can sit in the open space beside a diagonal
+  instead of avoiding the whole box, with `COIN_CLEARANCE` (half the beam's drawn
+  thickness plus a 7px margin) keeping a visible gap.
+- **Windowed / windowed-fullscreen / fullscreen, fully scalable.** The game now renders
+  every frame to a fixed 1100x640 `canvas` surface, and `present()` scales that into
+  whatever the window is as the very last step. Scaling is uniform on both axes with the
+  remainder as letterbox bars, so no mode stretches the art or crops the playfield. F11
+  cycles the three modes (`apply_display_mode`), the windowed mode is `RESIZABLE` and
+  handles `VIDEORESIZE`, and the current mode is labelled on the name-entry screen and
+  in the corner during play. `smoothscale` rather than nearest: at the non-integer
+  factors an arbitrary window produces, nearest leaves sprite pixels unevenly sized and
+  the antialiased UI text visibly jagged.
+
+  The point of doing it this way is that **no game code is resolution-aware** — not one
+  collision box, spawn coordinate, sprite scale or layout constant changed, and
+  `SCREEN_W`/`SCREEN_H` remain plain constants. A test asserts `window.get_size()`
+  appears exactly once in the whole file, inside `present()`.
+
+**Verification**: 25 headless checks — zero coin/beam overlaps across 5 seeds x 2 lanes
+x 2 in-game minutes (75,446 coin samples), tested tighter than the spawn rule itself;
+both spawn orders covered explicitly, including the previously-broken one; no coin ever
+removed while on screen; `coin_is_clear` allowing a coin in the open corner of a
+diagonal's bbox while rejecting one on the beam; and `present()` fitting without
+cropping and preserving aspect ratio to within 0.01 at 1100x640, 1920x1080, 2560x1440,
+800x480, 1280x1024 and 640x640, with correct letterbox fill. Plus a 761-frame run of the
+real `main()` loop cycling through all three display modes mid-run without an exception,
+holding a median 16.64ms frame against the 60fps cap.
+
 ## Open items / next up
 
 - Homing/tracking missiles — **done, see Phase 10.**
@@ -627,5 +847,16 @@ are in those files.
   `rebuild_manager_sprites.py` also still points at the sandbox paths it was
   originally written under (`/mnt/user-data/uploads`, `/home/claude`) rather than
   local ones, so it needs its three path constants updated before it will re-run.
+- Zappers (beams between emitter nodes, spawned in patterns) — **done, see Phase 15.**
+  The extracted emitter-burst frames (`zapper_arc_g1_*`) aren't used yet; they'd suit a
+  flash at each node, or the explosion VFX that's still a primitive placeholder.
+- Coin formations — **done, see Phase 16**; coin/zapper separation, **Phase 19.**
+- A telegraph on the straight missile — **done, see Phase 17.**
+- Both players racing an identical course — **done, see Phase 18.**
+- Windowed / borderless / fullscreen scaling — **done, see Phase 19.**
+- Still missing versus the original: spin tokens and the end-of-run slot machine,
+  missions/objectives, gadgets, and the death slide ("final blast") where Barry tumbles
+  along the ground for bonus distance. The vehicle roster is also two of the original's
+  nine or so.
 - Possibly split into multiple files if the project keeps growing — held
   off so far since a single file is easier to hand around for a demo.
