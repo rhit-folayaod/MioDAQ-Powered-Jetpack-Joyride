@@ -14,9 +14,14 @@ Hardware (optional -- NI USB DAQ, e.g. an NI myDAQ):
 
 Controls:
     Name entry: type on the keyboard, TAB to switch player field, ENTER to start.
+    Start a round hands-free: both players hold their buttons together for 2 seconds
+        (SPACE + UP on the keyboard works too, DAQ connected or not).
     Player 1: Button 1  (falls back to SPACE only when no DAQ is connected)
     Player 2: Button 2  (falls back to UP ARROW only when no DAQ is connected)
     R (or both buttons together): once both players are down, returns to name entry to play again
+    Shift+Q: admin portal -- type the passcode to wipe the saved leaderboard. Only opens
+        between rounds (name entry / game over), and is deliberately not shown on screen.
+        Shift-modified so a plain "q" still types into a name field.
     ESC: quit
 
 Run:
@@ -55,6 +60,15 @@ ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 SCORES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "high_scores.json")
 MAX_HIGH_SCORES = 5
 MAX_NAME_LEN = 14
+
+# Admin portal: a passcode-gated menu (Shift+Q between rounds) whose only action is wiping
+# the saved leaderboard, so the board can be cleared between demo sessions without quitting
+# the game or hunting down high_scores.json. Not a security boundary and not treated as
+# one -- it exists so a wipe can't happen by a single stray keypress in front of an
+# audience. It is deliberately never advertised on screen for the same reason.
+ADMIN_PASSCODE = "admin"
+ADMIN_MAX_INPUT = 16
+ADMIN_MESSAGE_TIME = 2.0  # seconds the result line shows; a successful wipe then auto-closes
 
 
 # ---------------------------------------------------------------------------
@@ -195,9 +209,22 @@ DEATH_FRAME_COUNT = 4
 DEATH_FPS = 9.0
 DEATH_SPRITE_H = 46  # slightly larger than PLAYER_SPRITE_H -- the flame silhouette reads better bigger
 
-# Profit Bird vehicle: a single static sprite swap (no run/jetpack animation frames
-# exist for it), given a gentle hover bob at draw time so it doesn't look frozen.
-PROFIT_BIRD_SPRITE_H = 54
+# Profit Bird vehicle: assets/profit_bird_00..05.png -- a wing-flap cycle built out of the
+# one static source pose by rebuild_profit_bird_sprites.py (it cuts the wing out, heals the
+# belly behind it, and re-composites the wing at six angles).
+#
+# Unlike every other animation here it is *not* played off the global clock: the cycle runs
+# once per flap from the player's own timer (Player.flap_anim_t) so the wings beat exactly
+# when a press lifts the bird, which is what makes the flap read as the cause of the hop
+# rather than as idle motion happening nearby. Frame 5 is the neutral glide pose, so a
+# non-looping playback naturally settles there between flaps with no special-casing.
+PROFIT_BIRD_FRAME_COUNT = 6
+PROFIT_BIRD_FPS = 16.0
+PROFIT_BIRD_FLAP_CYCLE = PROFIT_BIRD_FRAME_COUNT / PROFIT_BIRD_FPS  # seconds for one flap
+# The generated frames carry vertical headroom for the downstroke (a 91px canvas around a
+# 65px bird), so this is the *canvas* height, not the bird's -- it's larger than the old
+# static sprite's 54 purely so the bird itself still draws at the same size on screen.
+PROFIT_BIRD_SPRITE_H = 76
 
 # Lil' Stomper vehicle: assets/lilstomper_00..05.png (a 6-frame walk/stomp cycle),
 # looped the same way the run cycle loops.
@@ -217,6 +244,11 @@ STOMPER_FLOAT_REGEN_RATE = STOMPER_FLOAT_FUEL_MAX / 1.0  # only regenerates whil
 # upward hop (velocity set outright, not additive, same as the genre), no hold-to-fly
 # and no fuel; gravity does the rest between hops.
 PROFIT_BIRD_FLAP_SPEED = 420.0  # px/s upward impulse applied on each fresh press
+
+# Start screen: both players hold their own button down together for this long to launch a
+# round. A hold rather than a press so an idle fidget on the buttons -- or an audience
+# member trying them out -- can't start a round before both players are actually ready.
+START_HOLD_TIME = 2.0
 
 # Fuel system: holding thrust continuously drains the tank; running dry cuts thrust
 # off (you fall) until it's refilled by letting go. Matches the "~3s of hold" ask.
@@ -393,6 +425,10 @@ class Player:
         self.death_anim_t = 0.0
         self.on_ground = False
         self.stomper_float_fuel = STOMPER_FLOAT_FUEL_MAX
+        # Time since the current Profit Bird wing flap started. Seeded at a full cycle
+        # (not 0.0) so a freshly-mounted bird is already past the end of the one-shot
+        # animation and sits on the glide frame instead of flapping unprompted.
+        self.flap_anim_t = PROFIT_BIRD_FLAP_CYCLE
 
     def rect(self):
         return pygame.Rect(PLAYER_X - PLAYER_SIZE // 2, int(self.y - PLAYER_SIZE // 2),
@@ -435,8 +471,10 @@ class Player:
         elif is_profit_bird:
             # Flappy-Bird style: each fresh press is a discrete hop (velocity set
             # outright, not held/accumulated), no fuel involved.
+            self.flap_anim_t += dt
             if just_pressed:
                 self.vy = -PROFIT_BIRD_FLAP_SPEED
+                self.flap_anim_t = 0.0  # restart the wing beat on the same frame as the hop
             self.thrusting = False
             accel = GRAVITY
         else:
@@ -1305,12 +1343,18 @@ def draw_player(surface, p, t, run_frames, jetpack_frames, death_frames):
     surface.blit(sprite, img_rect)
 
 
-def draw_vehicle_player(surface, p, t, frames, fps):
-    """Vehicle-mode sprite swap: Profit Bird passes a single-frame list (static, just
-    bobs); Lil' Stomper passes its 6-frame walk cycle (anim_frame loops it like run_frames).
+def draw_vehicle_player(surface, p, t, frames, fps, frame_t=None, loop=True):
+    """Vehicle-mode sprite swap: Lil' Stomper passes its 6-frame walk cycle (anim_frame
+    loops it like run_frames); Profit Bird passes its flap cycle with loop=False.
     Draws a jetpack flame while Lil' Stomper is actively floating (p.thrusting), same as
-    the base character's jetpack flame, so the limited float is visually legible."""
-    sprite = anim_frame(frames, t, fps)
+    the base character's jetpack flame, so the limited float is visually legible.
+
+    `frame_t` (default: the global clock `t`) is the clock the *frames* advance on, kept
+    separate from `t` so Profit Bird can drive its one-shot flap off the player's own
+    per-flap timer while the hover bob still rides the global clock -- otherwise the bob
+    would freeze along with the wings whenever the bird was gliding.
+    """
+    sprite = anim_frame(frames, t if frame_t is None else frame_t, fps, loop=loop)
     bob = math.sin(t * 5) * 3
     img_rect = sprite.get_rect(center=(PLAYER_X, int(p.y + bob)))
     if p.thrusting:
@@ -1468,6 +1512,18 @@ def save_high_scores(scores):
         print(f"Could not save high scores: {exc}")
 
 
+def clear_high_scores():
+    """Wipes the persistent leaderboard -- the admin portal's only action.
+
+    Returns the now-empty list rather than returning nothing, so the caller's in-memory
+    copy is replaced from the same call that rewrites the file and the two can't drift.
+    Overwrites high_scores.json with an empty list instead of deleting it, so the next
+    save writes to a file that's already there.
+    """
+    save_high_scores([])
+    return []
+
+
 def add_high_scores(scores, entries):
     """Merges new (name, distance, coins) entries in, re-sorts by distance, trims, and persists."""
     merged = scores + entries
@@ -1520,6 +1576,67 @@ def draw_name_entry(surface, font_big, font_med, font_small, names, active_field
                       font_small, (130, 130, 140), (SCREEN_W // 2, SCREEN_H - 16))
 
 
+def draw_start_hold(surface, font_small, progress):
+    """Hold-to-start meter on the name screen, filling while both buttons are held.
+
+    Drawn even at zero progress rather than only appearing once a hold begins: an empty
+    meter sitting under the name boxes is the thing that tells a player standing at the
+    buttons that holding them is how a round starts. The keyboard fallback is spelled out
+    because it works here whether or not the DAQ is connected, unlike during a run.
+    """
+    filling = progress > 0.0
+    draw_text_center(surface, "STARTING..." if filling else "HOLD BOTH BUTTONS (or SPACE + UP) TO START",
+                      font_small, (255, 220, 90) if filling else (170, 170, 180),
+                      (SCREEN_W // 2, 400))
+    track = pygame.Rect(0, 0, 380, 16)
+    track.center = (SCREEN_W // 2, 428)
+    pygame.draw.rect(surface, FUEL_BAR_EMPTY_COLOR, track, border_radius=8)
+    fill_w = int(track.width * min(1.0, progress))
+    if fill_w > 0:
+        pygame.draw.rect(surface, (255, 220, 90), (track.left, track.top, fill_w, track.height),
+                          border_radius=8)
+    pygame.draw.rect(surface, (95, 95, 110), track, width=1, border_radius=8)
+
+
+def draw_admin_portal(surface, font_big, font_med, font_small, typed, message, message_ok):
+    """Modal passcode prompt, drawn over whatever screen was underneath it.
+
+    The dim is light enough to leave the leaderboard in the corner readable through it,
+    so when the passcode lands the operator watches the board go empty behind the panel
+    -- confirmation of the wipe rather than just a line of text claiming it happened.
+    """
+    overlay = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 170))
+    surface.blit(overlay, (0, 0))
+
+    panel = pygame.Rect(0, 0, 540, 250)
+    panel.center = (SCREEN_W // 2, SCREEN_H // 2)
+    pygame.draw.rect(surface, (28, 31, 42), panel, border_radius=10)
+    pygame.draw.rect(surface, (200, 170, 70), panel, width=2, border_radius=10)
+
+    draw_text_center(surface, "ADMIN PORTAL", font_big, (255, 220, 90),
+                      (SCREEN_W // 2, panel.top + 44))
+    draw_text_center(surface, "Enter passcode to reset the leaderboard", font_small,
+                      (170, 170, 180), (SCREEN_W // 2, panel.top + 82))
+
+    box = pygame.Rect(0, 0, 340, 44)
+    box.center = (SCREEN_W // 2, panel.top + 132)
+    pygame.draw.rect(surface, (18, 20, 28), box, border_radius=8)
+    pygame.draw.rect(surface, (200, 170, 70), box, width=2, border_radius=8)
+    text = font_med.render(typed, True, WHITE)
+    surface.blit(text, (box.left + 12, box.centery - text.get_height() // 2))
+    if int(time.time() * 2) % 2 == 0:
+        cursor_x = box.left + 12 + text.get_width() + 2
+        pygame.draw.line(surface, WHITE, (cursor_x, box.top + 8), (cursor_x, box.bottom - 8), 2)
+
+    if message:
+        draw_text_center(surface, message, font_small,
+                          (120, 230, 150) if message_ok else (255, 110, 100),
+                          (SCREEN_W // 2, panel.top + 178))
+    draw_text_center(surface, "ENTER to confirm  -  ESC to close", font_small,
+                      (140, 140, 150), (SCREEN_W // 2, panel.bottom - 26))
+
+
 def main():
     pygame.init()
     pygame.display.set_caption("Two-Player Jetpack Joyride Demo")
@@ -1546,9 +1663,13 @@ def main():
     death_frames = [load_scaled_sprite(os.path.join(ASSET_DIR, f"death_{i:02d}.png"), DEATH_SPRITE_H)
                      for i in range(DEATH_FRAME_COUNT)]
 
-    # Vehicle-mode sprite swaps -- Profit Bird passed to draw_vehicle_player() as a
-    # single-frame list (static, just bobs); Lil' Stomper as its real 6-frame walk cycle.
-    profit_bird_frames = [load_scaled_sprite(os.path.join(ASSET_DIR, "profit_bird.png"), PROFIT_BIRD_SPRITE_H)]
+    # Vehicle-mode sprite swaps -- both real animation cycles now: Profit Bird's 6-frame
+    # wing flap (played once per press, see PROFIT_BIRD_FRAME_COUNT) and Lil' Stomper's
+    # 6-frame walk. The bird's frames are generated by rebuild_profit_bird_sprites.py from
+    # assets/profit_bird.png, which is kept around as that script's source art.
+    profit_bird_frames = [load_scaled_sprite(os.path.join(ASSET_DIR, f"profit_bird_{i:02d}.png"),
+                                              PROFIT_BIRD_SPRITE_H)
+                           for i in range(PROFIT_BIRD_FRAME_COUNT)]
     stomper_frames = [load_scaled_sprite(os.path.join(ASSET_DIR, f"lilstomper_{i:02d}.png"), STOMPER_SPRITE_H)
                        for i in range(STOMPER_FRAME_COUNT)]
 
@@ -1626,17 +1747,84 @@ def main():
     state = "enter_names"  # "enter_names" or "playing" (game-over is just "playing" + both dead)
     pygame.key.start_text_input()  # on for name entry; turned off during "playing" (see below)
 
+    # How long both inputs have been held on the start screen. `armed` gates that: it goes
+    # False whenever we land on the name screen and only comes back once both inputs have
+    # been seen released, so the both-buttons-held restart at game over can't roll straight
+    # through the name screen into another round while the players are still holding.
+    start_hold_t = 0.0
+    start_hold_armed = True
+
+    # Admin portal state. A flag rather than another `state` value: it's a modal drawn over
+    # whichever screen is underneath, so making it a state would mean teaching the whole
+    # draw path to remember what to render behind it.
+    admin_open = False
+    admin_input = ""
+    admin_message = ""
+    admin_message_ok = False
+    admin_message_t = 0.0
+    admin_swallow_text = False
+
     def go_to_name_entry():
         # Returning to name entry from game-over (via R or both-buttons-down). Re-enabling
         # text input here -- rather than leaving it on throughout "playing" -- is what stops
         # the R keypress that triggers this from also leaking an "r" into the name field:
         # while text input is off, SDL never generates a TEXTINPUT event for that keypress
         # in the first place, so there's nothing to leak regardless of event ordering.
-        nonlocal name_inputs, active_field, state
+        nonlocal name_inputs, active_field, state, start_hold_t, start_hold_armed
         name_inputs = [player_names[0], player_names[1]]  # prefilled, quick restart
         active_field = 0
         state = "enter_names"
+        # Disarmed until both inputs are released: the both-buttons restart that gets here
+        # is itself a both-buttons hold, so without this it would satisfy the hold-to-start
+        # meter immediately and launch a round before anyone could retype a name.
+        start_hold_t = 0.0
+        start_hold_armed = False
         pygame.key.start_text_input()
+
+    def start_game():
+        """Launches a round. Reached from ENTER and from the hold-to-start meter."""
+        nonlocal scores_recorded, state, start_hold_t
+        player_names[0] = name_inputs[0].strip() or "Player 1"
+        player_names[1] = name_inputs[1].strip() or "Player 2"
+        reset_game()
+        scores_recorded = False
+        state = "playing"
+        start_hold_t = 0.0
+        pygame.key.stop_text_input()  # stops KEYDOWN presses during play (e.g. R) from
+                                       # also generating a TEXTINPUT event
+
+    def open_admin_portal():
+        nonlocal admin_open, admin_input, admin_message, admin_swallow_text, start_hold_t
+        admin_open = True
+        admin_input = ""
+        admin_message = ""
+        start_hold_t = 0.0  # a hold in progress shouldn't keep charging behind the modal
+        # On the name screen text input is already live, so SDL still delivers a TEXTINPUT
+        # for the very 'Q' that opened this -- swallow exactly that one so the passcode
+        # field doesn't start with a stray character. Opened from game over, text input is
+        # off and that press generates nothing, so there is nothing to swallow.
+        admin_swallow_text = state == "enter_names"
+        pygame.key.start_text_input()
+
+    def close_admin_portal():
+        nonlocal admin_open
+        admin_open = False
+        # Hand text input back to whichever screen we're returning to: on during name
+        # entry, off during play so R and friends don't double as TEXTINPUT events.
+        if state == "enter_names":
+            pygame.key.start_text_input()
+        else:
+            pygame.key.stop_text_input()
+
+    def submit_admin_passcode():
+        nonlocal high_scores, admin_input, admin_message, admin_message_ok, admin_message_t
+        if admin_input.strip().lower() == ADMIN_PASSCODE:
+            high_scores = clear_high_scores()
+            admin_message, admin_message_ok = "LEADERBOARD RESET", True
+        else:
+            admin_message, admin_message_ok = "INCORRECT PASSCODE", False
+        admin_message_t = 0.0
+        admin_input = ""
 
     running = True
     while running:
@@ -1654,28 +1842,58 @@ def main():
                     display_mode = DISPLAY_MODES[(DISPLAY_MODES.index(display_mode) + 1)
                                                   % len(DISPLAY_MODES)]
                     window = apply_display_mode(display_mode, desktop_size)
+                elif admin_open:
+                    # Ahead of the global ESC-quits binding on purpose, so ESC backs out
+                    # of the portal instead of quitting the game out from under it.
+                    if event.key == pygame.K_ESCAPE:
+                        close_admin_portal()
+                    elif event.key == pygame.K_BACKSPACE:
+                        admin_input = admin_input[:-1]
+                    elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                        submit_admin_passcode()
                 elif event.key == pygame.K_ESCAPE:
                     running = False
+                elif (event.key == pygame.K_q and event.mod & pygame.KMOD_SHIFT
+                        and (state == "enter_names" or all(not p.alive for p in players))):
+                    # Shift-modified so a plain 'q' still types into a name field -- the
+                    # portal would otherwise make names like "Quinn" impossible to enter.
+                    # Between rounds only (name entry or game over, the same guard the R
+                    # restart uses), never mid-run where it would freeze a live race.
+                    open_admin_portal()
                 elif state == "enter_names":
                     if event.key == pygame.K_BACKSPACE:
                         name_inputs[active_field] = name_inputs[active_field][:-1]
                     elif event.key == pygame.K_TAB:
                         active_field = 1 - active_field
                     elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                        player_names[0] = name_inputs[0].strip() or "Player 1"
-                        player_names[1] = name_inputs[1].strip() or "Player 2"
-                        reset_game()
-                        scores_recorded = False
-                        state = "playing"
-                        pygame.key.stop_text_input()  # stops KEYDOWN presses during play (e.g. R) from
-                                                       # also generating a TEXTINPUT event
+                        start_game()
                 elif state == "playing" and event.key == pygame.K_r and all(not p.alive for p in players):
                     go_to_name_entry()
-            elif event.type == pygame.TEXTINPUT and state == "enter_names":
-                if len(name_inputs[active_field]) < MAX_NAME_LEN:
+            elif event.type == pygame.TEXTINPUT:
+                if admin_open:
+                    # Matched on both "is this the first character since the portal
+                    # opened" and "is it actually a q", so that if SDL ever doesn't
+                    # deliver that TEXTINPUT the flag can't go on to eat a real keystroke
+                    # and turn the typed passcode into "dmin". Case-folded because the
+                    # shifted hotkey arrives as "Q".
+                    swallow, admin_swallow_text = admin_swallow_text, False
+                    if swallow and event.text.lower() == "q":
+                        pass  # the 'Q' that opened the portal
+                    elif len(admin_input) < ADMIN_MAX_INPUT:
+                        admin_input += event.text
+                elif state == "enter_names" and len(name_inputs[active_field]) < MAX_NAME_LEN:
                     name_inputs[active_field] += event.text
 
-        if state == "playing":
+        if admin_open:
+            # The modal freezes whatever is underneath: no lane updates, no hold charging.
+            daq.set_leds(False, False)
+            if admin_message:
+                admin_message_t += dt
+                if admin_message_t >= ADMIN_MESSAGE_TIME:
+                    if admin_message_ok:
+                        close_admin_portal()  # wipe done and seen -- drop back to the game
+                    admin_message = ""
+        elif state == "playing":
             if daq.available:
                 # Buttons are the primary input during the demo -- keyboard is ignored
                 # so an audience member near a keyboard can't steal control.
@@ -1724,7 +1942,22 @@ def main():
             if all(not p.alive for p in players) and thrust[0] and thrust[1]:
                 go_to_name_entry()
         else:
-            daq.set_leds(False, False)
+            # Hold-to-start on the name screen: both players' buttons -- or both keyboard
+            # fallbacks -- held together for START_HOLD_TIME launches the round, so a demo
+            # runs start to finish from the buttons without anyone reaching for a keyboard.
+            # Unlike gameplay this accepts the keyboard even with the DAQ connected: there's
+            # no round in progress for a bystander's keypress to interfere with.
+            daq_b1, daq_b2 = daq.get_buttons()
+            keys = pygame.key.get_pressed()
+            both_held = (daq_b1 and daq_b2) or (keys[key_map[0]] and keys[key_map[1]])
+            daq.set_leds(both_held, both_held)  # hardware feedback that the hold registered
+            if not both_held:
+                start_hold_t = 0.0
+                start_hold_armed = True  # released -- a fresh hold may start charging
+            elif start_hold_armed:
+                start_hold_t += dt
+                if start_hold_t >= START_HOLD_TIME:
+                    start_game()
 
         # ---- draw ----
         anim_t = pygame.time.get_ticks() / 1000.0
@@ -1736,6 +1969,7 @@ def main():
             canvas.blit(dim, (0, 0))
             draw_name_entry(canvas, font_big, font_med, font_small, name_inputs, active_field,
                              DISPLAY_MODE_LABELS[display_mode])
+            draw_start_hold(canvas, font_small, start_hold_t / START_HOLD_TIME)
         else:
             for i, lane in enumerate(lanes):
                 canvas.blit(lane_overlays[i], (0, lane.lane_top))
@@ -1762,7 +1996,11 @@ def main():
                     draw_score_popup(canvas, pop, font_med)
 
                 if p.alive and p.vehicle_active and p.vehicle_kind == "profit_bird":
-                    draw_vehicle_player(canvas, p, anim_t, profit_bird_frames, 1.0)
+                    # Frames advance on the player's per-flap timer, not the global clock,
+                    # and don't loop -- so the cycle fires on the press and settles on the
+                    # glide frame until the next one.
+                    draw_vehicle_player(canvas, p, anim_t, profit_bird_frames, PROFIT_BIRD_FPS,
+                                         frame_t=p.flap_anim_t, loop=False)
                 elif p.alive and p.vehicle_active and p.vehicle_kind == "lil_stomper":
                     draw_vehicle_player(canvas, p, anim_t, stomper_frames, STOMPER_FPS)
                 else:
@@ -1830,6 +2068,12 @@ def main():
                                            (130, 130, 140)), (16, SCREEN_H - 28))
 
         draw_high_scores(canvas, font_small, font_small, high_scores)
+
+        # Last, so the modal sits over the leaderboard it's about -- and over it lightly
+        # enough that the board is still readable as it empties.
+        if admin_open:
+            draw_admin_portal(canvas, font_big, font_med, font_small, admin_input,
+                               admin_message, admin_message_ok)
 
         present(window, canvas)
 

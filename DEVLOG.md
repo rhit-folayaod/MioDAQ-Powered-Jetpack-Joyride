@@ -833,6 +833,96 @@ cropping and preserving aspect ratio to within 0.01 at 1100x640, 1920x1080, 2560
 real `main()` loop cycling through all three display modes mid-run without an exception,
 holding a median 16.64ms frame against the 60fps cap.
 
+## Phase 20 — Demo-readiness: hold-to-start, a flapping Profit Bird, an admin portal
+
+Three changes aimed squarely at running the thing in front of an audience rather than at
+the game itself.
+
+**Hold both buttons for 2s to start.** Every round previously began at the keyboard
+(ENTER), which meant a demo could never actually be run from the cabinet. Now both
+players holding their own button together for `START_HOLD_TIME` (2.0s) launches the
+round, with a meter under the name boxes filling as it charges, and the LEDs lit while
+it does so the hardware confirms the hold registered. A *hold* rather than a press
+because two buttons sitting in front of an audience get fidgeted with, and a round
+starting before both players are ready is the failure mode that matters here. The
+keyboard combo (SPACE + UP) works on this screen even when the DAQ is connected, unlike
+during a run where the keyboard is deliberately ignored so a bystander can't steal
+control — there is no round in progress on the name screen to interfere with.
+
+The subtle part was the interaction with the *existing* both-buttons restart at game
+over: that returns to name entry while both buttons are still held, which would have
+satisfied the new hold meter immediately and rolled straight into another round before
+anyone could retype a name. So the meter is **armed**, not merely timed — it goes
+disarmed on every arrival at the name screen and only re-arms once both inputs have
+actually been seen released.
+
+**A Profit Bird that flaps.** Phase 11 gave the bird real art but only one static pose,
+hover-bobbed at draw time to avoid looking frozen. There is no flap art to extract, so
+`rebuild_profit_bird_sprites.py` *makes* it: it isolates the wing by palette (its four
+orange shades plus the black outline touching them), heals the body behind it by filling
+every removed pixel from the nearest surviving body pixel — so the patch inherits the
+belly's shading gradient rather than reading as a flat red slab — and re-composites the
+wing at six angles about the shoulder.
+
+- The first attempt filled only the part of the hole *enclosed* by the remaining
+  silhouette, on the theory that the wing's feather tips overhang the belly and should
+  stay transparent. That healed zero pixels: removing the wing opens a channel to the
+  outside, so the whole hole floods. Filling all of it turned out to look better anyway
+  — the healed region reads as the bird's tail, where the topological version left a
+  ragged notch.
+- Frames are padded to **one shared canvas sized by actually rotating the wing's pixel
+  coordinates** for every frame, not by a trig estimate of the swing, so no feather tip
+  can clip. Symmetric, so the body stays dead centre — the game blits these centred on
+  the player's y. `PROFIT_BIRD_SPRITE_H` went 54 → 76 purely to absorb that padding; the
+  bird itself still draws at the same on-screen size (78px wide, as before).
+- It is the only animation here **not** played off the global clock. The cycle runs once
+  per flap from `Player.flap_anim_t`, reset on the same frame as the hop, so the wings
+  beat exactly when a press lifts the bird — which is what makes the flap read as the
+  *cause* of the hop instead of idle motion happening nearby. Frame 5 is the neutral
+  glide pose, so a non-looping `anim_frame` settles there between flaps with no
+  special-casing at all. `draw_vehicle_player` grew a `frame_t`/`loop` pair for this,
+  with `frame_t` kept separate from `t` so the hover bob doesn't freeze along with the
+  wings while gliding.
+
+**Admin portal.** Shift+Q between rounds opens a passcode-gated modal whose only action
+is wiping the saved leaderboard, so the board can be cleared between demo sessions
+without quitting the game or hunting down `high_scores.json`. It's not a security
+boundary and isn't treated as one — it exists so a wipe can't happen from one stray
+keypress in front of an audience, and it's deliberately never advertised on screen for
+the same reason.
+
+- A **flag, not another `state` value**: it's a modal drawn over whichever screen is
+  underneath, so making it a state would mean teaching the whole draw path to remember
+  what to render behind it. It's drawn last, after the leaderboard, and dims lightly
+  enough that the board stays readable — so the operator watches it go empty behind the
+  panel rather than trusting a line of text that claims it happened.
+- Restricted to name entry and game over (the same guard the R restart uses), never
+  mid-run, and its key handling sits *ahead* of the global ESC-quits binding so ESC backs
+  out of the portal instead of quitting the game out from under it.
+- **Shift-modified**, which the first pass wasn't. Plain Q is a perfectly good hotkey
+  right up until you notice the name screen is a text field: grabbing it there means
+  nobody can be called Quinn. Requiring `KMOD_SHIFT` costs nothing and gives the letter
+  back.
+- The `Q` leak: on the name screen text input is already live, so SDL delivers a
+  TEXTINPUT for the very keypress that opened the portal — the mirror of the Phase 13 `r`
+  leak. It's swallowed, but matched on *both* "first character since the portal opened"
+  and "is actually a q" (case-folded, since the shifted hotkey arrives as `Q`), so if
+  that event ever doesn't arrive the flag can't go on to eat a real keystroke and turn
+  the typed passcode into `dmin`.
+
+**Verification**: a scripted 436-frame run of the *real* `main()` loop with a stubbed DAQ
+and a fake clock, observing which screen is live by wrapping the module-level draw
+functions (main()'s state lives in locals). It covers the portal end to end — a plain `q`
+typing into the name field instead of opening anything, Shift+Q opening it, that `Q`
+being swallowed, `admin` typing through, the wipe firing on ENTER exactly once, the
+result message holding, and the auto-close returning to the name screen — then
+the hold meter charging to a round start, the arming guard holding the meter at exactly
+0.0 for every frame of a still-held restart, and a release/re-hold starting a second
+round. Plus headless checks that all six bird frames load registered to one canvas, that
+the flap plays frames 0–5 once and then holds the glide frame, that each fresh press
+restarts it, that `clear_high_scores` empties both memory and the JSON file, and that the
+passcode accepts case/whitespace variants while rejecting near-misses.
+
 ## Open items / next up
 
 - Homing/tracking missiles — **done, see Phase 10.**
@@ -851,6 +941,10 @@ holding a median 16.64ms frame against the 60fps cap.
   The extracted emitter-burst frames (`zapper_arc_g1_*`) aren't used yet; they'd suit a
   flash at each node, or the explosion VFX that's still a primitive placeholder.
 - Coin formations — **done, see Phase 16**; coin/zapper separation, **Phase 19.**
+- Hold-to-start, a flapping Profit Bird, and an admin portal — **done, see Phase 20.**
+  Unlike `rebuild_manager_sprites.py`, `rebuild_profit_bird_sprites.py` uses paths
+  relative to the repo, so it re-runs in place. The bird still has only the one wing the
+  source art draws — the far wing and the tail are static through the flap.
 - A telegraph on the straight missile — **done, see Phase 17.**
 - Both players racing an identical course — **done, see Phase 18.**
 - Windowed / borderless / fullscreen scaling — **done, see Phase 19.**
