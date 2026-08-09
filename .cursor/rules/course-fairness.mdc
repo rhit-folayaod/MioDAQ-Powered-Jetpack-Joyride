@@ -1,0 +1,60 @@
+---
+description: Invariants that keep a head-to-head race fair; break these and the game is broken
+globs: ["jetpack/lane.py", "jetpack/patterns.py", "jetpack/game.py"]
+alwaysApply: true
+---
+
+# Course fairness invariants
+
+Two properties make this a race rather than two unrelated runs. Both are enforced
+structurally. Changes in `lane.py`, `patterns.py` or `reset_game` must preserve them.
+
+## 1. Both lanes must generate identical courses from one seed
+
+Every spawn position and timing comes from `self.rng`, the `random.Random` a lane
+owns. Seeding two lanes identically makes their courses byte-identical.
+
+- **Never call the global `random` module from lane or spawn code.** Anything else
+  in the process consuming randomness would shift the sequence and destroy
+  reproducibility. Always `self.rng`.
+- **Never draw from `self.rng` conditionally on player state.** Two lanes must make
+  the same number of draws in the same order regardless of how each player is doing,
+  or the courses diverge partway through a round.
+- New spawn timers, new jitter, new pattern parameters: all `self.rng`.
+- `reset_game` draws one seed and passes it to both lanes. Do not give lanes
+  separate seeds, and do not reseed mid-round.
+- Keep `Lane.update()` taking `target_y` as a parameter rather than holding a
+  `Player` reference. That decoupling is why a lane can be simulated with no player
+  at all, which `tools/pick_course_seeds.py` requires.
+
+## 2. Every spawned pattern must be provably flyable
+
+`pattern_is_passable()` sweeps a candidate in 8px columns and requires an opening of
+at least `ZAPPER_MIN_GAP_H` in every one. `_spawn()` re-rolls up to 8 times, then
+falls back to a short floor beam that cannot wall the lane off by construction.
+
+- **Every new zapper pattern goes through this check.** Do not add a builder whose
+  output bypasses `_spawn()`.
+- Do not trust authored numbers instead of the check. The check immediately caught a
+  real case: two facing emitter nodes each eat half a node's width, so a gap authored
+  at 84px left only 64px free.
+- Column step must stay well under the player's height so no beam slips between
+  samples.
+- Keep the fallback trivially safe. It is the last line of defence and must not be
+  able to block a lane.
+
+Adding a coin formation or zapper pattern is a builder function plus one tuple
+entry in `patterns.py`. Nothing in `lane.py` should need to change.
+
+## Telegraphs are safe by construction, not by a flag
+
+- A `MissileWarning` has no `rect()` and no `collides()`, and the `Missile` is not
+  constructed until the warning elapses. Do not give the warning a hitbox, and do
+  not pre-create the missile "disabled."
+- A telegraphing `SeekingMissile` is excluded from `Lane.hazards()` by state.
+- Scientists are excluded from `hazards()` entirely — they are a reward and must
+  never damage the player. Their absence is intentional and documented; do not
+  "fix" it.
+
+If you change `COURSE_SEEDS`, regenerate it with `tools/pick_course_seeds.py` rather
+than hand-editing. Its `PCT_LO`/`PCT_HI` are the difficulty dial.

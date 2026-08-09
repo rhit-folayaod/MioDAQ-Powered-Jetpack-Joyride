@@ -1,0 +1,54 @@
+---
+description: Hard constraints on anything touching the NI DAQ
+globs: ["jetpack/daq.py", "jetpack/game.py"]
+alwaysApply: true
+---
+
+# DAQ constraints
+
+`jetpack/daq.py` is the only module permitted to import `nidaqmx` or touch hardware.
+Two invariants hold above it, and both are load-bearing.
+
+## 1. Nothing on the render path may block on the driver
+
+The game loop must never call into `nidaqmx`. It reads `daq.get_buttons()` (a
+lock-protected cache) and calls `daq.set_leds()` (which only stores intent). The
+poll thread performs every actual read and write.
+
+- Do not call `read()` or `write()` from the game loop, or from anything the game
+  loop calls.
+- Do not make `set_leds()` synchronous, blocking, or return a confirmation. It is
+  called every frame.
+- Do not hold `self._lock` across a driver call. It guards two list assignments and
+  nothing more. Holding it over `read()` reintroduces exactly the stall this design
+  exists to prevent.
+- Do not lengthen `DAQ_POLL_INTERVAL` to "reduce load." 10ms is already below
+  perceptible input latency; longer makes buttons feel broken.
+
+## 2. Absent or broken hardware is a normal state, never an error
+
+Missing package, missing device, and a mid-run driver failure all resolve the same
+way: `available` goes False and every method degrades to a no-op.
+
+- Do not raise out of `DaqIO`. Callers have no hardware error path, by design.
+- Do not add a `require_daq` flag or a hard failure when no device is found. The
+  keyboard fallback is how this is developed and how most people will run it.
+- Do not retry inside the poll loop. A DAQ that has begun failing keeps failing, and
+  a retry would print once per 10ms while doing it.
+- Keep the fallback message on stdout. It is the first thing anyone debugging a
+  hardware setup reads.
+
+## Wiring specifics that look like bugs and are not
+
+- The DO write order is reversed (`write([leds[1], leds[0]])`): `line6` drives LED 2
+  and `line7` drives LED 1. This matches the physical board, confirmed against
+  hardware. Do not "correct" it without pressing a real button first — an earlier
+  attempt to fix the line mapping from a stale comment broke working hardware.
+- `DEVICE`, `BUTTON_LINES` and `LED_LINES` live in `config.py`, not here.
+
+## Known gap, deliberately documented rather than silently fixed
+
+`DaqIO.close()` early-returns on `not self.available`, so if the poll thread died
+mid-run the two tasks are never closed and stay reserved until the process exits.
+If you fix this, close the tasks on *every* path, including the constructor's
+`except`, which currently nils its task references without closing them.

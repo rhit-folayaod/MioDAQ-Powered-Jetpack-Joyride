@@ -1,0 +1,9 @@
+# Extra dependencies for the offline scripts in tools/ only. The game does not
+# import any of these -- install them just to regenerate sprites or reselect the
+# course-seed pool.
+#
+#     pip install -r requirements.txt -r requirements-tools.txt
+
+numpy==2.5.1
+pillow==12.3.0
+scipy==1.16.3

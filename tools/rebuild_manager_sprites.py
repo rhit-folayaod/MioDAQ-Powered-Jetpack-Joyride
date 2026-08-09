@@ -1,15 +1,25 @@
 """
-Builds 'manager scientist' sprites: extracts frames from the sprite sheet and
-swaps in a photo head. All tunables are at the top so you can re-run and eyeball.
+Builds the scientist sprites: extracts frames from a sprite sheet and swaps in a
+photo head. All tunables are at the top so you can re-run and eyeball the result.
+
+NOTE: this script cannot run as-is. Unlike the other two rebuild scripts, its two
+source images were never committed -- the scientist sheet and the face photo both
+live outside the repo. The twelve frames it produced are in assets/ and the game
+uses them, but regenerating them means supplying the two files below yourself.
+Kept in the repo because it documents exactly how those frames were made.
+
+Run (from the repo root, once the sources below exist):
+    python tools/rebuild_manager_sprites.py
 """
 from PIL import Image, ImageDraw, ImageFilter
 import numpy as np
 from scipy.ndimage import label
 import os, sys
 
-SHEET_PATH = '/mnt/user-data/uploads/Scientist.jpg'
-PHOTO_PATH = '/mnt/user-data/uploads/Austin_Faceshot.jfif'
-OUT = '/home/claude/manager_sprites'
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SHEET_PATH = os.path.join(ROOT, 'assets', 'source', 'Scientist.jpg')       # not in the repo
+PHOTO_PATH = os.path.join(ROOT, 'assets', 'source', 'Austin_Faceshot.jfif')  # not in the repo
+OUT = os.path.join(ROOT, 'assets')
 
 # ---- TUNABLES -------------------------------------------------
 HEAD_SCALE   = 1.35   # 1.0 = same width as the sprite's own head. >1 = bobblehead (more readable at small px)
@@ -90,5 +100,6 @@ cols, rown, pad, sc = 4, 3, 6, 6
 cs = Image.new('RGB', (cols*(mw+pad)+pad, rown*(mh+pad)+pad), (35,38,48))
 for i,f in enumerate(final):
     cs.paste(f, (pad+(i%cols)*(mw+pad), pad+(i//cols)*(mh+pad)), f)
-cs.resize((cs.width*sc, cs.height*sc), Image.NEAREST).save('/home/claude/contact_manager2.png')
+cs.resize((cs.width*sc, cs.height*sc), Image.NEAREST).save(
+    os.path.join(ROOT, 'contact_manager.png'))  # gitignored build output
 print('wrote', len(final), 'frames to', OUT)

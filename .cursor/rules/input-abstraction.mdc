@@ -1,0 +1,55 @@
+---
+description: The contract any new input source must satisfy
+globs: ["jetpack/game.py", "jetpack/entities.py", "jetpack/daq.py"]
+alwaysApply: true
+---
+
+# Input collapses to two booleans, in exactly one place
+
+Once per frame `game.main` reduces whatever input is live to `thrust`, a list of two
+bools — one per player. Below that line, nothing knows where input came from.
+
+```python
+if daq.available:
+    daq_b1, daq_b2 = daq.get_buttons()
+    thrust = [daq_b1, daq_b2]
+else:
+    keys = pygame.key.get_pressed()
+    thrust = [keys[key_map[0]], keys[key_map[1]]]
+```
+
+## Adding an input source
+
+Produce that pair of bools at that branch. Touch nothing else. Do **not**:
+
+- introduce an `InputSource` base class or a strategy object — the entire interface
+  would be one method returning `tuple[bool, bool]`, and the two existing sources
+  share no other structure;
+- pass a source, device handle or event object into `Player`, `Lane` or any draw
+  function;
+- add a source-specific branch anywhere downstream of that reduction.
+
+`Player.update(dt, thrust_held, scroll_speed)` takes a bool. Keep it that way.
+
+## Press edges are derived, not received
+
+Two of the three control schemes key off a release→press *edge*. The DAQ has no
+equivalent of `KEYDOWN` — it exposes a level, sampled per frame — so the edge is
+computed inside `Player.update` from `self._was_held`.
+
+Do not move edge detection into the input layer or reach for `pygame.KEYDOWN` to get
+it. Deriving it from the level is what makes the two sources genuinely equivalent
+rather than merely similar, and a keyboard-only edge would silently not work on
+hardware.
+
+## Where the keyboard is deliberately allowed alongside a DAQ
+
+Two exceptions, both intentional — do not "fix" them into consistency:
+
+- **Name entry** always uses the keyboard. Typing a name on two momentary buttons
+  is not practical.
+- **The hold-to-start meter** accepts DAQ *or* keyboard even when a DAQ is present,
+  because no round is in progress for a bystander's keypress to interfere with.
+
+During a round with a DAQ connected, the keyboard is ignored on purpose, so nobody
+near the machine can take control mid-race.

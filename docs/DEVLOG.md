@@ -1,14 +1,21 @@
 # Dev Log: Two-Player Jetpack Joyride DAQ Demo
 
-A build log for an internal engineering-showcase demo: a two-player,
+A build log for an engineering-showcase demo: a two-player,
 Jetpack-Joyride-style side-scroller in `pygame`, controlled by an NI DAQ
 (physical buttons + LEDs) with automatic keyboard fallback for dev/testing.
-Kept mostly to a single file (`InternShowcaseDemo.py`) on purpose, since this
-is a demo project, not a shipped product.
 
-This log is written chronologically, in the order the decisions actually got
-made (including the wrong turns), since that's more useful for a write-up
-than a cleaned-up "final architecture" description.
+This log is chronological, written in the order the decisions actually got made
+— including the wrong turns, the bugs, and at least one thing that got fixed in
+the wrong direction twice. That's the point of keeping it. For the tidied-up
+"here is how it fits together" version, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+Two notes for reading it now:
+
+- The game lived as a single file, `InternShowcaseDemo.py`, for Phases 1–21.
+  It was split into the `jetpack/` package in Phase 22, so class and function
+  names below are all still accurate but the file they lived in is not.
+- The sprite-generation and seed-selection scripts moved to `tools/` at the
+  same time.
 
 ---
 
@@ -308,20 +315,9 @@ follow-up hit after grace expires is fatal; and the Stomper ceiling clamp actual
 caps climb height. Also rendered one frame of every new entity type off-screen to
 catch draw-time errors before trusting it visually.
 
-**New sprite assets needed** (all three are currently pygame-primitive placeholders,
-flagged in-code with `PLACEHOLDER` docstrings on `draw_seeking_missile`,
-`draw_vehicle_token`, and `draw_coin`):
-- A seeking-missile sprite (currently a solid-color triangle/chevron).
-- Profit Bird / Lil' Stomper token sprites (currently pulsing colored circles —
-  gold and light-blue respectively).
-- A coin sprite (currently a solid yellow circle).
-- Vehicle-mode player recolor currently reuses the existing run/jetpack frames with
-  a flat tint (same `tinted_sprite()` trick as the player-2 recolor from Phase 7)
-  rather than a real vehicle sprite swap — fine as a placeholder, but a real Profit
-  Bird / Lil' Stomper character swap would read much better.
-  - **Update, Phase 11**: vehicle token, regular coin, Profit Bird, and a proper
-    death animation all got real art. Seeking missiles are the only placeholder
-    left standing.
+All three shipped as pygame-primitive placeholders, each flagged in-code with a
+`PLACEHOLDER` docstring so the gap was visible from the code rather than only from
+this log. They were replaced with real art over Phases 11–13.
 
 ---
 
@@ -583,7 +579,7 @@ looping) and the knockdown `assets/manager_down_00..03.png` (4 frames, 9 FPS, pl
 once). Both are loaded with the existing `load_scaled_sprite` at a shared
 `SCIENTIST_SPRITE_H`, and unlike the player frames they aren't tinted per lane —
 scientists are world objects, like obstacles and coins, so both lanes share one set.
-The frames `rebuild_manager_sprites.py` produces carry ~20% of their canvas height as
+The frames `tools/rebuild_manager_sprites.py` produces carry ~20% of their canvas height as
 empty padding beneath the feet (headroom for the composited bobblehead), so
 `draw_scientist()` nudges the sprite down by `SCIENTIST_FOOT_PAD` to land the visible
 feet on the lane floor instead of the blank bottom edge of the canvas. The collision
@@ -604,7 +600,7 @@ dummy driver, which ended with a live player on 3 coins — one knockdown — an
 alive, and screenshots confirming the feet land on the floor.
 
 **Known art issue**: the four `manager_down_*` frames don't actually depict a
-knockdown. `rebuild_manager_sprites.py`'s `ROW2` crops point at the sprite sheet's
+knockdown. `tools/rebuild_manager_sprites.py`'s `ROW2` crops point at the sprite sheet's
 row 2, which is a standing/fighting idle — so a knocked-over scientist currently
 stands calmly for a second and vanishes. The sheet does contain a real
 fall-to-prone sequence (stumble → double over → collapse → flat on the ground) lower
@@ -858,7 +854,7 @@ actually been seen released.
 
 **A Profit Bird that flaps.** Phase 11 gave the bird real art but only one static pose,
 hover-bobbed at draw time to avoid looking frozen. There is no flap art to extract, so
-`rebuild_profit_bird_sprites.py` *makes* it: it isolates the wing by palette (its four
+`tools/rebuild_profit_bird_sprites.py` *makes* it: it isolates the wing by palette (its four
 orange shades plus the black outline touching them), heals the body behind it by filling
 every removed pixel from the nearest surviving body pixel — so the patch inherits the
 belly's shading gradient rather than reading as a flat red slab — and re-composites the
@@ -910,6 +906,24 @@ the same reason.
   that event ever doesn't arrive the flag can't go on to eat a real keystroke and turn
   the typed passcode into `dmin`.
 
+**A face on the missile.** The same gag as the Phase 14 scientists, applied to the rocket:
+`tools/rebuild_missile_sprite.py` composites a coworker's photo head onto `missile_base.png`
+(the original faceless rocket, kept as source art) and writes `missile.png`.
+
+The constraint is legibility — the rocket draws 24px tall and crosses the lane in about a
+second. The first attempt inset the head as a porthole on the hull, which at that size is
+a smudge; the second oversized it into a bobblehead, which swallowed the rocket entirely
+and left the hazard unrecognisable. What works is in between: a head at nearly the full
+height of the hull, placed over the **nose**, which is both the part of the silhouette a
+player's eye already tracks and the end the rocket leads with. Fins, nozzle and flame are
+untouched, so it still reads as a rocket at a glance. It's sized to fit the original 62x24
+canvas, so the sprite scale, the collision box and the draw call are all unchanged — the
+only edit outside the new script is the art-provenance comment.
+
+The seeker deliberately keeps the plain rocket: it's drawn as a *tinted* duplicate, and
+multiplying a face by orange/red is unflattering at best — and having the two missile
+types look different is a readability win rather than an inconsistency.
+
 **Verification**: a scripted 436-frame run of the *real* `main()` loop with a stubbed DAQ
 and a fake clock, observing which screen is live by wrapping the module-level draw
 functions (main()'s state lives in locals). It covers the portal end to end — a plain `q`
@@ -923,34 +937,120 @@ the flap plays frames 0–5 once and then holds the glide frame, that each fresh
 restarts it, that `clear_high_scores` empties both memory and the JSON file, and that the
 passcode accepts case/whitespace variants while rejecting near-misses.
 
-## Open items / next up
+## Phase 21 — A vetted pool of course seeds
 
-- Homing/tracking missiles — **done, see Phase 10.**
-- Real sprite art for vehicle tokens, coins, Profit Bird, and player death — **done,
-  see Phase 11.**
-- Real sprite art + animation for Lil' Stomper, pickup-triggered hazard clearing,
-  and a real background — **done, see Phase 12.**
-- A seeking-missile sprite — **done, see Phase 13.** A dedicated explosion-burst
-  sprite/particle effect is still a primitive placeholder.
-- Knock-over scientists — **done, see Phase 14.** Their knockdown frames still need
-  re-cropping from the sheet's actual fall sequence (see the known art issue there);
-  `rebuild_manager_sprites.py` also still points at the sandbox paths it was
-  originally written under (`/mnt/user-data/uploads`, `/home/claude`) rather than
-  local ones, so it needs its three path constants updated before it will re-run.
-- Zappers (beams between emitter nodes, spawned in patterns) — **done, see Phase 15.**
-  The extracted emitter-burst frames (`zapper_arc_g1_*`) aren't used yet; they'd suit a
-  flash at each node, or the explosion VFX that's still a primitive placeholder.
-- Coin formations — **done, see Phase 16**; coin/zapper separation, **Phase 19.**
-- Hold-to-start, a flapping Profit Bird, and an admin portal — **done, see Phase 20.**
-  Unlike `rebuild_manager_sprites.py`, `rebuild_profit_bird_sprites.py` uses paths
-  relative to the repo, so it re-runs in place. The bird still has only the one wing the
-  source art draws — the far wing and the tail are static through the flap.
-- A telegraph on the straight missile — **done, see Phase 17.**
-- Both players racing an identical course — **done, see Phase 18.**
-- Windowed / borderless / fullscreen scaling — **done, see Phase 19.**
-- Still missing versus the original: spin tokens and the end-of-run slot machine,
-  missions/objectives, gadgets, and the death slide ("final blast") where Barry tumbles
-  along the ground for bonus distance. The vehicle roster is also two of the original's
-  nine or so.
-- Possibly split into multiple files if the project keeps growing — held
-  off so far since a single file is easier to hand around for a demo.
+Phase 18 made both players race one seeded course, but that seed was
+`random.randrange(2**31)` — so a round could land anywhere in the difficulty
+distribution, including the tail that ends a run in a few seconds. That's a bad way to
+open a demo. The ask was a set of ~20 courses spanning easy to hard, still randomly
+chosen, still shared by both players, and skewed easier than pure chance.
+
+**Measuring difficulty.** `tools/pick_course_seeds.py` scores a candidate by simulating it with
+the game's own `Lane` at a fixed 60fps and, every frame, measuring the largest vertical
+opening across *the player's own column* — the same span-merge `pattern_is_passable`
+runs, but pinned to one column instead of swept across a pattern. That distinction is the
+whole point: it reports the slot the player is being asked to fit through at that moment,
+rather than a property of the pattern in the abstract. Constrained frames are grouped into
+obstacle "events", and a seed is scored on obstacle density, the mean narrowest opening
+per event and the 10th-percentile opening, and the vertical speed needed to get from one
+event's opening to the next. The five metrics are z-scored against the sample before
+being weighted, since they're a count, two pixel measures and two px/s measures.
+
+The first pass also scored missiles, seekers and tokens — and measuring them was what
+showed they should be dropped. Over a minute they come out at 8–10 missiles, 2–3 seekers
+and 3 tokens on essentially every seed, because their spawn timers are tightly clustered
+constants; including them would have added noise to the ranking rather than signal. Their
+*first-arrival* times do vary by several seconds, so those are reported per chosen seed
+for eyeballing but left out of the score.
+
+**Choosing the pool.** 2000 candidates scored (~49ms each), then 20 taken at evenly
+spaced percentiles from the 2nd to the 80th. The full sample runs −8.86 to +13.56 with a
+median of +0.04; the pool runs −5.39 to +2.11 with a median of −0.58. So the change isn't
+mainly a shift of the middle — it's that the top fifth, which is where the long hard tail
+lives, is gone entirely, while a 7.5-wide easy→hard spread survives. The seeds are stored
+unlabelled and unordered, since nobody should be able to tell from the screen which end of
+the pool they drew.
+
+`reset_game` picks from the pool and **excludes the current seed**: with only 20 courses,
+plain `random.choice` produces back-to-back repeats often enough over a demo session to
+look like a bug.
+
+Worth being straight about the limits: this grades *within* the `pattern_is_passable`
+guarantee, and it's a proxy for how much precision the geometry demands, not for whether a
+course is fun or reachable by a particular player. The generator's own bounds also cap how
+different two seeds can be — the pool's easiest and hardest differ by roughly 28 vs 32
+obstacles and 134px vs 123px of typical clearance.
+
+**Verification**: all 20 pooled seeds give the two lanes byte-identical geometry over 30
+simulated seconds (zappers compared relative to each lane's own top, plus missile and coin
+positions); no pooled course ever closes below 84px against a 32px player across 90
+simulated seconds each; the pool's median score is below a 200-seed random baseline and
+its maximum is below that baseline's maximum while still spanning a 7.7-wide range; and
+over 4000 draws of the pick logic all 20 seeds are reachable, none repeats back-to-back,
+and the distribution stays even (177–231 each).
+
+## Still open
+
+What a follow-up would actually pick up, as of the Phase 22 refactor:
+
+- **The scientist knockdown frames are the wrong crop.** `ROW2` in
+  `tools/rebuild_manager_sprites.py` points at the sheet's standing/fighting idle,
+  so a knocked-over scientist stands calmly for 0.7s and vanishes. The sheet does
+  contain a real fall-to-prone sequence (see Phase 14 for the coordinates), and
+  swapping the crops is the whole fix — no game code changes. Blocked in practice
+  because that script's two source images were never committed, so it can't be
+  re-run without supplying them again.
+- **The explosion VFX is still a primitive.** An expanding ring and fading core;
+  `draw_explosion` has carried a `PLACEHOLDER` docstring since Phase 12. The
+  extracted emitter-burst frames (`zapper_arc_g1_*`, now in `assets/unused/`) would
+  suit either this or a flash at each zapper node.
+- **No committed test suite.** Every phase above describes headless verification
+  that found real bugs; none of those scripts were kept. This is the largest gap in
+  the project and the first thing worth fixing.
+- **The Profit Bird only has one wing.** The far wing and tail are static through
+  the flap, because the source art only ever drew one.
+- **Missing versus the original game:** spin tokens and the end-of-run slot machine,
+  missions, gadgets, and the death slide. The vehicle roster is two of about nine.
+
+Re-running `tools/pick_course_seeds.py` is what regenerates `COURSE_SEEDS`; its
+`PCT_LO`/`PCT_HI` are the difficulty dial.
+
+## Phase 22 — Splitting the file, and packaging for publication
+
+Everything above was built in one module, which passed 2100 lines around Phase 20.
+That was the right shape early — a single file is genuinely easier to hand to
+someone at a desk — and the wrong one well before the end.
+
+Split into a `jetpack/` package along boundaries the code already implied:
+`config` (constants, data only), `daq`, `entities`, `patterns`, `lane`, `render`,
+`scores`, `ui`, `game`, behind a thin `main.py`. Dependencies run one way, with
+`config` importing nothing and `game` imported by nothing.
+
+The split was done as a pure mechanical move — code relocated verbatim, only import
+statements written new — specifically so it could be *proven* rather than trusted.
+The old module was kept alongside the new package long enough to run an equivalence
+check between them:
+
+- all 20 pooled seeds × both lane positions × 60 simulated seconds, comparing a full
+  course signature (every zapper, missile, warning, seeker, token, coin and
+  scientist, plus all seven spawn timers and scroll speed) every 15 frames — 9,600
+  signature comparisons, zero divergence;
+- 40 player-physics trials × 1200 frames under randomised input, covering all three
+  control schemes and a mid-run vehicle hit, comparing 13 fields per frame — no
+  divergence;
+- all 132 shared constants equal, with the three deliberate relocations
+  (`ZAPPER_PATTERNS` and `COIN_FORMATIONS` to `patterns`, `NIDAQMX_AVAILABLE` to
+  `daq`) confirmed identical in their new homes;
+- 16,000 comparisons of `Zapper.collides`, `blocked_y_range`, `pattern_is_passable`
+  and `coin_is_clear` against random geometry.
+
+Only then was the original deleted. The one genuine code change the split required
+was the two path constants, which had resolved relative to the game file and now
+resolve from the package's parent, so assets and the leaderboard are found
+regardless of the working directory the game was launched from.
+
+Alongside it, the repo was packaged for publication: a `.gitignore` (the committed
+`__pycache__` and the runtime leaderboard both stopped being tracked), pinned
+requirements split into runtime and tooling, an MIT license covering the code only,
+and `ASSET-CREDITS.md` recording where the art came from — including two assets
+whose provenance was never written down and now can't be recovered.

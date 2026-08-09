@@ -19,8 +19,8 @@ rather than as a pasted-on layer:
 
 All tunables are at the top so you can re-run and eyeball contact_profit_bird.png.
 
-Run:
-    python rebuild_profit_bird_sprites.py
+Run (from the repo root):
+    python tools/rebuild_profit_bird_sprites.py
 """
 import os
 
@@ -28,10 +28,10 @@ import numpy as np
 from PIL import Image
 from scipy.ndimage import binary_dilation, distance_transform_edt, label
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(HERE, "assets", "profit_bird.png")
-OUT_DIR = os.path.join(HERE, "assets")
-CONTACT = os.path.join(HERE, "contact_profit_bird.png")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.join(ROOT, "assets", "profit_bird.png")
+OUT_DIR = os.path.join(ROOT, "assets")
+CONTACT = os.path.join(ROOT, "contact_profit_bird.png")  # gitignored build output
 
 # ---- TUNABLES -------------------------------------------------
 # (wing angle in degrees, body offset in px). Positive angle sweeps the wing tip DOWN;

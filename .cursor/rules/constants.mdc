@@ -1,0 +1,32 @@
+---
+description: Where tunable values live and what may not be added to config
+globs: ["jetpack/**/*.py"]
+alwaysApply: true
+---
+
+# Gameplay constants live in `jetpack/config.py`, and only there
+
+Every tunable number, colour, timing, sprite count and file path is defined in
+`jetpack/config.py`. Other modules read them via `from .config import *`.
+
+- **Never introduce a magic number in gameplay, spawn or draw code.** If a value
+  affects how the game plays or looks, it goes in `config.py` with a comment saying
+  what it does and why it has that value — not what it is, which is readable.
+- **Never define a tunable locally** "just for this function." That is how the
+  single source of truth stops being single.
+- Sprite frame counts and FPS values are constants too (`RUN_FRAME_COUNT`,
+  `SCIENTIST_RUN_FPS`, …). A frame count that disagrees with what is on disk is a
+  startup crash, which is the intended failure mode.
+
+`config.py` must stay **data only**: no classes, no functions, no logic, no imports
+beyond `os` for the two paths. That property is what makes the star import
+defensible — the module provably cannot do anything but bind names.
+
+Things that are *not* config, and belong with their behaviour instead:
+
+- `ZAPPER_PATTERNS` / `COIN_FORMATIONS` — tuples of functions, so they live in
+  `patterns.py` next to the builders they collect.
+- `NIDAQMX_AVAILABLE` — a runtime capability flag, so it lives in `daq.py`.
+
+Constants derived from other constants are computed in `config.py`
+(`ZAPPER_MIN_GAP_H = PLAYER_SIZE * 2.5`), never recomputed at a call site.

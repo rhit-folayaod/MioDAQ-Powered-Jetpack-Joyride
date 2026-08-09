@@ -1,0 +1,36 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Claude Code local settings -- contains absolute paths and a local username
+.claude/
+
+# Runtime state, not seed data: the leaderboard is written by the game as it is
+# played, so a clone should start with an empty board rather than inheriting
+# whoever ran it last. The game recreates this file on the first completed round.
+high_scores.json
+
+# Contact sheets: regenerated on every run of the tools/rebuild_*.py scripts,
+# so they are build output rather than source art.
+contact_*.png

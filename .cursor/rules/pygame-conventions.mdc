@@ -1,0 +1,66 @@
+---
+description: Rendering, animation and entity conventions used throughout this codebase
+globs: ["jetpack/**/*.py"]
+alwaysApply: true
+---
+
+# pygame conventions in this project
+
+## Draw code never mutates game state
+
+Every function in `render.py` and `ui.py` takes a surface plus what to draw, and
+changes nothing. This is what allows a `Lane` to be stepped for sixty simulated
+seconds with no display — which `tools/pick_course_seeds.py` depends on, and which
+every headless test in the DEVLOG relied on.
+
+If a draw function needs to change something, that change belongs in the caller.
+
+## Nothing outside `present()` is resolution-aware
+
+The game draws to a fixed `SCREEN_W × SCREEN_H` canvas; `render.present()` scales it
+into the window as the final act of the frame.
+
+- Never query the window size outside `present()`. `window.get_size()` appears
+  exactly once in the package — keep it that way.
+- Never scale a coordinate, collision box or sprite by a display factor. Write
+  positions in canvas pixels and let `present()` handle the rest.
+
+## Animation is time-driven and stateless
+
+`anim_frame(frames, t, fps, pingpong=..., loop=...)` computes the frame index from a
+clock. Do not store a current-frame index on an entity — one less thing to reset at
+a round boundary, and the pattern the whole codebase already follows.
+
+Two deliberate exceptions, both because the animation must be caused by an event
+rather than run freely:
+
+- **Profit Bird's flap** runs off `Player.flap_anim_t`, reset on the press, so the
+  wings beat *because* of the hop rather than alongside it.
+- **The scientist knockdown** runs off the scientist's own `anim_t` with
+  `loop=False`, since a one-shot needs time measured from the moment of impact.
+
+Give looping world objects a phase offset derived from their own x
+(`t + z.x0 * 0.013`) so a screenful doesn't animate in unison.
+
+## Entities
+
+- Lane-resident entities use `__slots__`. A lane holds hundreds and rebuilds them
+  every round.
+- Hazards share an informal protocol, not a base class: anything yielded by
+  `Lane.hazards()` exposes `collides(player_rect)` and tests *itself*. That is what
+  lets a zapper be a line segment and a missile be a box while the kill check in
+  `game.main` stays a single call site.
+- **Collision is measured against actual geometry, never a convenience bounding
+  box.** A zapper tests its segment with `Rect.clipline()`; its `rect()` exists only
+  for culling, spawn-blocking and explosion placement. For a diagonal, the bbox
+  covers roughly twice the beam's visible area, and dying in visibly empty space
+  reads as a cheat.
+- Errors in collision should favour the player. The beam counts as zero-width while
+  drawing ~16px thick, deliberately.
+
+## Sprites
+
+Load eagerly in `main()`, before the loop, via `load_scaled_sprite()`. A missing
+asset should crash at startup, not thirty seconds into a demo when the entity first
+spawns. Recolour with `tinted_sprite()` on a colour pre-lightened by `lighten()` — a
+raw multiply by a saturated colour crushes shading to a single hue.
